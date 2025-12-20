@@ -7,7 +7,6 @@ import (
 	"github.com/nats-io/nats.go"
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
-	"google.golang.org/protobuf/proto"
 )
 
 // MetricExporter exports metrics to NATS.
@@ -74,8 +73,8 @@ func (e *MetricExporter) Export(ctx context.Context, rm *metricdata.ResourceMetr
 	// Convert SDK metrics to proto
 	metricsData := resourceMetricsToProto(rm)
 
-	// Marshal to protobuf
-	data, err := proto.Marshal(metricsData)
+	// Marshal using configured encoding
+	data, err := e.config.marshal(metricsData)
 	if err != nil {
 		return err
 	}

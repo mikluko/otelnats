@@ -9,6 +9,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
@@ -310,8 +311,20 @@ func (r *Receiver) Start(ctx context.Context) error {
 // message is a minimal interface for both core NATS and JetStream messages.
 type message interface {
 	Data() []byte
+	Headers() nats.Header
 	Ack() error
 	Nak() error
+}
+
+// unmarshal decodes message data based on Content-Type header.
+// Supports both protobuf (default) and JSON encoding.
+func unmarshal(msg message, v proto.Message) error {
+	contentType := msg.Headers().Get(headerContentType)
+	if contentType == contentTypeJSON {
+		return protojson.Unmarshal(msg.Data(), v)
+	}
+	// Default to protobuf for backward compatibility
+	return proto.Unmarshal(msg.Data(), v)
 }
 
 // msgHandler is a generic handler for messages
@@ -355,6 +368,10 @@ type coreNatsMsg struct {
 
 func (m *coreNatsMsg) Data() []byte {
 	return m.msg.Data
+}
+
+func (m *coreNatsMsg) Headers() nats.Header {
+	return m.msg.Header
 }
 
 func (m *coreNatsMsg) Ack() error {
@@ -460,7 +477,7 @@ func (r *Receiver) handleLogs(msg message) {
 	defer r.wg.Done()
 
 	var data logspb.LogsData
-	if err := proto.Unmarshal(msg.Data(), &data); err != nil {
+	if err := unmarshal(msg, &data); err != nil {
 		// Malformed message - ack to prevent redelivery of bad data
 		_ = msg.Ack()
 		return
@@ -492,7 +509,7 @@ func (r *Receiver) handleTraces(msg message) {
 	defer r.wg.Done()
 
 	var data tracespb.TracesData
-	if err := proto.Unmarshal(msg.Data(), &data); err != nil {
+	if err := unmarshal(msg, &data); err != nil {
 		_ = msg.Ack()
 		return
 	}
@@ -519,7 +536,7 @@ func (r *Receiver) handleMetrics(msg message) {
 	defer r.wg.Done()
 
 	var data metricspb.MetricsData
-	if err := proto.Unmarshal(msg.Data(), &data); err != nil {
+	if err := unmarshal(msg, &data); err != nil {
 		_ = msg.Ack()
 		return
 	}

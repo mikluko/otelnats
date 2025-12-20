@@ -131,6 +131,9 @@ otelnats.NewLogExporter(nc, otelnats.WithSubjectSuffix("tenant-a"))
 // Custom timeout (default: 5s)
 otelnats.NewLogExporter(nc, otelnats.WithTimeout(10*time.Second))
 
+// JSON encoding (default: protobuf)
+otelnats.NewLogExporter(nc, otelnats.WithEncoding(otelnats.EncodingJSON))
+
 // JetStream publishing (at-least-once delivery)
 js, _ := jetstream.New(nc)
 otelnats.NewLogExporter(nc, otelnats.WithJetStream(js))
@@ -230,9 +233,11 @@ Default subjects (configurable via `WithSubjectPrefix` and `WithSubjectSuffix`):
 | Field                 | Value                                   |
 |-----------------------|-----------------------------------------|
 | Subject               | `{prefix}.{signal}` or `{prefix}.{signal}.{suffix}` |
-| Payload               | Protobuf-serialized OTLP data |
-| Header `Content-Type` | `application/x-protobuf`      |
+| Payload               | Serialized OTLP data (protobuf or JSON) |
+| Header `Content-Type` | `application/x-protobuf` or `application/json` |
 | Header `Otel-Signal`  | `traces` / `metrics` / `logs` |
+
+Receivers auto-detect encoding from the `Content-Type` header.
 
 ## API Reference
 
@@ -273,8 +278,8 @@ func (r *Receiver) Shutdown(ctx context.Context) error
 
 - [x] JetStream consumer support for receivers (durable subscriptions, ack/nak)
 - [x] Stream and consumer creation helpers
+- [x] JSON encoding option
 - [ ] Compression support
-- [ ] JSON encoding option
 
 ## Related Projects
 

@@ -41,6 +41,18 @@ func WithTimeout(d time.Duration) Option {
 	}
 }
 
+// WithEncoding sets the serialization format for OTLP messages.
+// The default is EncodingProtobuf. Use EncodingJSON for JSON serialization.
+//
+// The Content-Type header is set automatically based on encoding:
+//   - EncodingProtobuf: application/x-protobuf
+//   - EncodingJSON: application/json
+func WithEncoding(enc Encoding) Option {
+	return func(c *config) {
+		c.encoding = enc
+	}
+}
+
 // WithJetStream enables JetStream publishing with acknowledgments.
 // When set, the exporter will use js.Publish() instead of nc.Publish(),
 // providing at-least-once delivery guarantees.

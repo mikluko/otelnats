@@ -6,7 +6,6 @@ import (
 
 	"github.com/nats-io/nats.go"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"google.golang.org/protobuf/proto"
 )
 
 // TraceExporter exports spans to NATS.
@@ -58,8 +57,8 @@ func (e *TraceExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOn
 	// Convert SDK spans to proto
 	tracesData := spansToTracesData(spans)
 
-	// Marshal to protobuf
-	data, err := proto.Marshal(tracesData)
+	// Marshal using configured encoding
+	data, err := e.config.marshal(tracesData)
 	if err != nil {
 		return err
 	}

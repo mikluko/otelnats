@@ -6,7 +6,6 @@ import (
 
 	"github.com/nats-io/nats.go"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
-	"google.golang.org/protobuf/proto"
 )
 
 // LogExporter exports log records to NATS.
@@ -58,8 +57,8 @@ func (e *LogExporter) Export(ctx context.Context, records []sdklog.Record) error
 	// Convert SDK records to proto
 	logsData := recordsToLogsData(records)
 
-	// Marshal to protobuf
-	data, err := proto.Marshal(logsData)
+	// Marshal using configured encoding
+	data, err := e.config.marshal(logsData)
 	if err != nil {
 		return err
 	}
