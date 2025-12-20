@@ -124,6 +124,10 @@ func main() {
 otelnats.NewLogExporter(nc, otelnats.WithSubjectPrefix("myapp"))
 // Publishes to: myapp.logs, myapp.traces, myapp.metrics
 
+// Subject suffix for multi-tenant routing
+otelnats.NewLogExporter(nc, otelnats.WithSubjectSuffix("tenant-a"))
+// Publishes to: otel.logs.tenant-a, otel.traces.tenant-a, otel.metrics.tenant-a
+
 // Custom timeout (default: 5s)
 otelnats.NewLogExporter(nc, otelnats.WithTimeout(10*time.Second))
 
@@ -142,6 +146,14 @@ return nats.Header{"X-Tenant-ID": []string{tenantFromContext(ctx)}}
 ```go
 // Custom subject prefix
 otelnats.NewReceiver(nc, otelnats.WithReceiverSubjectPrefix("myapp"))
+
+// Subject suffix for filtering or wildcard subscriptions
+otelnats.NewReceiver(nc, otelnats.WithReceiverSubjectSuffix("tenant-a"))
+// Subscribes to: otel.logs.tenant-a, otel.traces.tenant-a, otel.metrics.tenant-a
+
+// Wildcard suffix to receive from all tenants
+otelnats.NewReceiver(nc, otelnats.WithReceiverSubjectSuffix(">"))
+// Subscribes to: otel.logs.>, otel.traces.>, otel.metrics.>
 
 // Queue group for load balancing
 otelnats.NewReceiver(nc, otelnats.WithQueueGroup("processors"))
@@ -182,6 +194,13 @@ stream, _ := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
     MaxAge:   24 * time.Hour,
 })
 
+// For multi-tenant, use wildcard suffix
+stream, _ := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+    Name:     "TELEMETRY",
+    Subjects: otelnats.OTLPSubjects("otel", ">"),  // returns: otel.logs.>, otel.traces.>, otel.metrics.>
+    Storage:  jetstream.FileStorage,
+})
+
 // Create consumer
 consumer, _ := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
     Durable:       "analytics",
@@ -198,19 +217,19 @@ recv, _ := otelnats.NewReceiver(nc,
 
 ## Subject Naming
 
-Default subjects (configurable via `WithSubjectPrefix`):
+Default subjects (configurable via `WithSubjectPrefix` and `WithSubjectSuffix`):
 
-| Signal  | Subject        |
-|---------|----------------|
-| Logs    | `otel.logs`    |
-| Traces  | `otel.traces`  |
-| Metrics | `otel.metrics` |
+| Signal  | Subject (no suffix) | Subject (with suffix) |
+|---------|---------------------|----------------------|
+| Logs    | `otel.logs`         | `otel.logs.{suffix}` |
+| Traces  | `otel.traces`       | `otel.traces.{suffix}` |
+| Metrics | `otel.metrics`      | `otel.metrics.{suffix}` |
 
 ## Message Format
 
-| Field                 | Value                         |
-|-----------------------|-------------------------------|
-| Subject               | `{prefix}.{signal}`           |
+| Field                 | Value                                   |
+|-----------------------|-----------------------------------------|
+| Subject               | `{prefix}.{signal}` or `{prefix}.{signal}.{suffix}` |
 | Payload               | Protobuf-serialized OTLP data |
 | Header `Content-Type` | `application/x-protobuf`      |
 | Header `Otel-Signal`  | `traces` / `metrics` / `logs` |

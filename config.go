@@ -25,6 +25,7 @@ const (
 // config holds shared configuration for exporters and receivers.
 type config struct {
 	subjectPrefix string
+	subjectSuffix string
 	timeout       time.Duration
 	jetstream     jetstream.JetStream
 	headers       func(context.Context) nats.Header
@@ -38,7 +39,11 @@ func defaultConfig() *config {
 }
 
 func (c *config) subject(signal string) string {
-	return c.subjectPrefix + "." + signal
+	s := c.subjectPrefix + "." + signal
+	if c.subjectSuffix != "" {
+		s += "." + c.subjectSuffix
+	}
+	return s
 }
 
 func (c *config) buildHeaders(ctx context.Context, signal string) nats.Header {

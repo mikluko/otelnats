@@ -19,6 +19,18 @@ func WithSubjectPrefix(prefix string) Option {
 	}
 }
 
+// WithSubjectSuffix appends a suffix to the signal subjects.
+// For example, WithSubjectSuffix("tenant-a") with default prefix results in
+// subjects like "otel.logs.tenant-a".
+//
+// This is useful for multi-tenant deployments where each tenant publishes
+// to a unique subject hierarchy.
+func WithSubjectSuffix(suffix string) Option {
+	return func(c *config) {
+		c.subjectSuffix = suffix
+	}
+}
+
 // WithTimeout sets the timeout for publish operations.
 // The default timeout is 5 seconds.
 // For core NATS, this affects the flush timeout.

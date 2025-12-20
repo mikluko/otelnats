@@ -21,6 +21,16 @@ func TestOTLPSubjects(t *testing.T) {
 		subjects := OTLPSubjects("myapp")
 		require.ElementsMatch(t, []string{"myapp.logs", "myapp.traces", "myapp.metrics"}, subjects)
 	})
+
+	t.Run("with suffix", func(t *testing.T) {
+		subjects := OTLPSubjects("otel", ">")
+		require.ElementsMatch(t, []string{"otel.logs.>", "otel.traces.>", "otel.metrics.>"}, subjects)
+	})
+
+	t.Run("with tenant suffix", func(t *testing.T) {
+		subjects := OTLPSubjects("otel", "tenant-a")
+		require.ElementsMatch(t, []string{"otel.logs.tenant-a", "otel.traces.tenant-a", "otel.metrics.tenant-a"}, subjects)
+	})
 }
 
 func TestJetStreamIntegration(t *testing.T) {
@@ -209,4 +219,66 @@ func TestReceiverWithConsumerObject(t *testing.T) {
 	consumerCheck, err := stream.Consumer(ctx, "my-consumer")
 	require.NoError(t, err)
 	require.Equal(t, 2*time.Minute, consumerCheck.CachedInfo().Config.AckWait)
+}
+
+func TestMultiTenantWithSuffix(t *testing.T) {
+	ns := startEmbeddedNATSWithJetStream(t)
+	nc := connectToNATS(t, ns)
+	js := createJetStream(t, nc)
+	ctx := t.Context()
+
+	// Create stream with wildcard subjects for multi-tenant
+	_, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:     "MULTI_TENANT",
+		Subjects: OTLPSubjects("mt", ">"), // mt.logs.>, mt.traces.>, mt.metrics.>
+	})
+	require.NoError(t, err)
+
+	// Create exporter for tenant-a
+	expA, err := NewLogExporter(nc,
+		WithSubjectPrefix("mt"),
+		WithSubjectSuffix("tenant-a"),
+		WithJetStream(js),
+	)
+	require.NoError(t, err)
+
+	// Create exporter for tenant-b
+	expB, err := NewLogExporter(nc,
+		WithSubjectPrefix("mt"),
+		WithSubjectSuffix("tenant-b"),
+		WithJetStream(js),
+	)
+	require.NoError(t, err)
+
+	// Create receiver that subscribes to all tenants
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("mt"),
+		WithReceiverSubjectSuffix(">"),
+		WithReceiverJetStream(js, "MULTI_TENANT"),
+	)
+	require.NoError(t, err)
+
+	received := make(chan *logspb.LogsData, 10)
+	recv.OnLogs(func(_ context.Context, data *logspb.LogsData) error {
+		received <- data
+		return nil
+	})
+
+	require.NoError(t, recv.Start(ctx))
+	defer recv.Shutdown(ctx)
+
+	// Export from both tenants
+	rec := createTestLogRecord(t)
+	require.NoError(t, expA.Export(ctx, []sdklog.Record{rec}))
+	require.NoError(t, expB.Export(ctx, []sdklog.Record{rec}))
+
+	// Should receive both messages
+	for i := 0; i < 2; i++ {
+		select {
+		case <-received:
+			// OK
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timeout waiting for message %d", i+1)
+		}
+	}
 }

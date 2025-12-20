@@ -59,6 +59,7 @@ type Receiver struct {
 
 type receiverConfig struct {
 	subjectPrefix string
+	subjectSuffix string
 	queueGroup    string
 	chanBufSize   int
 
@@ -91,6 +92,18 @@ type ReceiverOption func(*receiverConfig)
 func WithReceiverSubjectPrefix(prefix string) ReceiverOption {
 	return func(c *receiverConfig) {
 		c.subjectPrefix = prefix
+	}
+}
+
+// WithReceiverSubjectSuffix appends a suffix to the signal subjects.
+// For example, WithReceiverSubjectSuffix(">") subscribes to "otel.logs.>",
+// which matches all subjects under that hierarchy (e.g., "otel.logs.tenant-a").
+//
+// This is useful for multi-tenant deployments where a receiver needs to
+// consume messages from all tenants.
+func WithReceiverSubjectSuffix(suffix string) ReceiverOption {
+	return func(c *receiverConfig) {
+		c.subjectSuffix = suffix
 	}
 }
 
@@ -306,6 +319,9 @@ type msgHandler func(message)
 
 func (r *Receiver) subscribe(ctx context.Context, signal string, handler msgHandler) error {
 	subject := r.config.subjectPrefix + "." + signal
+	if r.config.subjectSuffix != "" {
+		subject += "." + r.config.subjectSuffix
+	}
 
 	// JetStream subscription
 	if r.config.jetstream != nil {
@@ -352,8 +368,16 @@ func (m *coreNatsMsg) Nak() error {
 func (r *Receiver) subscribeJetStream(ctx context.Context, subject string, handler msgHandler) error {
 	consumerName := r.config.consumerName
 	if consumerName == "" {
-		// Generate ephemeral consumer name based on subject (replace dots with dashes)
-		consumerName = "otelnats-" + strings.ReplaceAll(subject, ".", "-")
+		// Generate ephemeral consumer name based on subject
+		// Replace dots with dashes and remove wildcards (not valid in consumer names)
+		name := strings.ReplaceAll(subject, ".", "-")
+		name = strings.ReplaceAll(name, ">", "")
+		name = strings.ReplaceAll(name, "*", "")
+		for strings.Contains(name, "--") {
+			name = strings.ReplaceAll(name, "--", "-")
+		}
+		name = strings.TrimSuffix(name, "-") // Clean trailing dash from removed wildcard
+		consumerName = "otelnats-" + name
 	}
 
 	var consumer jetstream.Consumer
