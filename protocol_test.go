@@ -3,12 +3,10 @@ package otelnats
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
@@ -258,39 +256,4 @@ func TestBuildHeaders(t *testing.T) {
 		require.Equal(t, SignalTraces, headers.Get(HeaderOtelSignal))
 		require.Len(t, headers, 2)
 	})
-}
-
-func TestPublishMessage(t *testing.T) {
-	ns := startEmbeddedNATS(t)
-	nc := connectToNATS(t, ns)
-
-	t.Run("core nats publishing", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(t.Context(), time.Second*2)
-		defer cancel()
-
-		sub, err := nc.SubscribeSync("test.subject")
-		require.NoError(t, err)
-		defer sub.Unsubscribe()
-
-		msg := &nats.Msg{
-			Subject: "test.subject",
-			Data:    []byte("test data"),
-			Header: nats.Header{
-				HeaderContentType: []string{ContentTypeProtobuf},
-			},
-		}
-
-		err = PublishMessage(ctx, nc, msg)
-		require.NoError(t, err)
-
-		received, err := sub.NextMsgWithContext(ctx)
-		require.NoError(t, err)
-		require.Equal(t, "test data", string(received.Data))
-		require.Equal(t, ContentTypeProtobuf, received.Header.Get(HeaderContentType))
-	})
-}
-
-// Mock types for testing - using uint64 wrappers as simple protobuf messages
-func createTestProtoMessage() proto.Message {
-	return wrapperspb.UInt64(42)
 }

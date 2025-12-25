@@ -315,12 +315,6 @@ func BuildHeaders(
 func ContentType(enc Encoding) string
 func Marshal(m proto.Message, enc Encoding) ([]byte, error)
 func Unmarshal(data []byte, contentType string, m proto.Message) error
-
-// Publishing
-func PublishMessage(ctx context.Context, pub publisher, msg *nats.Msg) error
-
-type publisher interface { PublishMsg(*nats.Msg) error }
-type flusher interface { FlushWithContext(context.Context) error }
 ```
 
 **Example**: Custom exporter using protocol primitives
@@ -355,8 +349,9 @@ func main() {
         Header:  otelnats.BuildHeaders(ctx, otelnats.SignalLogs, otelnats.EncodingProtobuf, nil),
     }
 
-    // Publish
-    otelnats.PublishMessage(ctx, nc, msg)
+    // Publish using NATS directly
+    nc.PublishMsg(msg)
+    nc.FlushWithContext(ctx)
 }
 ```
 
