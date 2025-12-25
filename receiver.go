@@ -17,13 +17,31 @@ import (
 	tracespb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
 
-type Message[T any] interface {
-	// Item must return ErrUnmarshal if the message data is invalid
-	Item() (*T, error)
+type MessageCore interface {
+	Subject() string
 	Data() []byte
 	Headers() nats.Header
+}
+
+type MessageFlow interface {
 	Ack() error
 	Nak() error
+	Term() error
+}
+
+type Message interface {
+	MessageCore
+	MessageFlow
+}
+
+type MessageSignal[T any] interface {
+	Message
+	// Item must return ErrUnmarshal if the message data is invalid
+	Item() (*T, error)
+}
+
+func MessageSignalFrom[T any](msg Message) MessageSignal[T] {
+	return &messageSignalImpl[T]{Message: msg}
 }
 
 type Receiver interface {
@@ -31,7 +49,7 @@ type Receiver interface {
 	Shutdown(ctx context.Context) error
 }
 
-type MessageHandler[T any] func(ctx context.Context, msg Message[T]) error
+type MessageHandler[T any] func(ctx context.Context, msg MessageSignal[T]) error
 
 // receiverImpl consumes OTLP telemetry from NATS subjects.
 type receiverImpl struct {
@@ -42,7 +60,7 @@ type receiverImpl struct {
 	started  bool
 	shutdown bool
 
-	// Message handlers
+	// MessageSignal handlers
 	logsMessageHandler    MessageHandler[logspb.LogsData]
 	tracesMessageHandler  MessageHandler[tracespb.TracesData]
 	metricsMessageHandler MessageHandler[metricspb.MetricsData]
@@ -54,8 +72,8 @@ type receiverImpl struct {
 	// JetStream consumers and their contexts
 	consumeContexts []jetstream.ConsumeContext
 
-	// Message backlog channels for JetStream
-	msgBacklogs []chan message
+	// MessageSignal backlog channels for JetStream
+	msgBacklogs []chan Message
 
 	// In-flight message tracking
 	wg sync.WaitGroup
@@ -272,14 +290,6 @@ func (r *receiverImpl) Start(ctx context.Context) error {
 	return nil
 }
 
-// message is a minimal interface for both core NATS and JetStream messages.
-type message interface {
-	Data() []byte
-	Headers() nats.Header
-	Ack() error
-	Nak() error
-}
-
 func (r *receiverImpl) subscribe(ctx context.Context) error {
 	// Build subject pattern to match all signals
 	subject := r.config.subjectPrefix + ".>"
@@ -294,7 +304,7 @@ func (r *receiverImpl) subscribe(ctx context.Context) error {
 
 	// Core NATS subscription - route messages by header
 	natsMsgHandler := func(msg *nats.Msg) {
-		r.routeMessage(&coreNatsMsg{msg: msg})
+		r.routeMessage(&messageCoreWrapper{msg: msg})
 	}
 
 	var sub *nats.Subscription
@@ -311,60 +321,45 @@ func (r *receiverImpl) subscribe(ctx context.Context) error {
 	return nil
 }
 
-// coreNatsMsg wraps *nats.Msg to implement a minimal interface for handlers
-type coreNatsMsg struct {
-	msg *nats.Msg
-}
-
-func (m *coreNatsMsg) Data() []byte {
-	return m.msg.Data
-}
-
-func (m *coreNatsMsg) Headers() nats.Header {
-	return m.msg.Header
-}
-
-func (m *coreNatsMsg) Ack() error {
-	return nil // Core NATS doesn't require ack
-}
-
-func (m *coreNatsMsg) Nak() error {
-	return nil // Core NATS doesn't support nak
-}
-
 // routeMessage routes a message to the appropriate handler based on the Otel-Signal header.
 // For messages with unconfigured handlers, sends NAK to trigger redelivery.
 // For messages with unknown/missing signal headers, terminates the message.
-func (r *receiverImpl) routeMessage(msg message) {
+func (r *receiverImpl) routeMessage(msg Message) {
 	signal := msg.Headers().Get(HeaderOtelSignal)
 
 	switch signal {
 	case SignalLogs:
+		msgSignal := MessageSignalFrom[logspb.LogsData](msg)
 		if r.logsMessageHandler == nil {
-			if err := msg.Nak(); err != nil {
+			if err := msgSignal.Term(); err != nil {
 				r.errorHandler(err)
 			}
+			r.errorHandler(fmt.Errorf("%w: %s", ErrNoHandlerForSignal, signal))
 			return
 		}
-		r.handleLogs(msg)
+		r.handleLogs(msgSignal)
 
 	case SignalTraces:
+		msgSignal := MessageSignalFrom[tracespb.TracesData](msg)
 		if r.tracesMessageHandler == nil {
-			if err := msg.Nak(); err != nil {
+			if err := msgSignal.Term(); err != nil {
 				r.errorHandler(err)
 			}
+			r.errorHandler(fmt.Errorf("%w: %s", ErrNoHandlerForSignal, signal))
 			return
 		}
-		r.handleTraces(msg)
+		r.handleTraces(msgSignal)
 
 	case SignalMetrics:
+		msgSignal := MessageSignalFrom[metricspb.MetricsData](msg)
 		if r.metricsMessageHandler == nil {
-			if err := msg.Nak(); err != nil {
+			if err := msgSignal.Term(); err != nil {
 				r.errorHandler(err)
 			}
+			r.errorHandler(fmt.Errorf("%w: %s", ErrNoHandlerForSignal, signal))
 			return
 		}
-		r.handleMetrics(msg)
+		r.handleMetrics(msgSignal)
 
 	default:
 		// Unknown or missing signal header - terminate the message
@@ -376,51 +371,6 @@ func (r *receiverImpl) routeMessage(msg message) {
 		}
 		// For core NATS, just ignore (no ack/nak needed)
 	}
-}
-
-// messageImpl wraps a message and provides generic typed access with lazy unmarshaling
-type messageImpl[T any] struct {
-	msg     message
-	item    T
-	itemErr error
-	once    sync.Once
-}
-
-func MessageFrom[T any](msg message) Message[T] {
-	return &messageImpl[T]{msg: msg}
-}
-
-func (m *messageImpl[T]) Item() (*T, error) {
-	m.once.Do(func() {
-		contentType := m.msg.Headers().Get(HeaderContentType)
-		// T must be a proto.Message, so we need to convert it
-		// This works because logspb.LogsData, tracespb.TracesData, metricspb.MetricsData all implement proto.Message
-		if protoMsg, ok := any(&m.item).(proto.Message); ok {
-			m.itemErr = Unmarshal(m.msg.Data(), contentType, protoMsg)
-			if m.itemErr != nil {
-				m.itemErr = fmt.Errorf("%w: %v", ErrUnmarshal, m.itemErr)
-			}
-		} else {
-			panic("invalid type T for MessageFrom, this is always a programming error")
-		}
-	})
-	return &m.item, m.itemErr
-}
-
-func (m *messageImpl[T]) Data() []byte {
-	return m.msg.Data()
-}
-
-func (m *messageImpl[T]) Headers() nats.Header {
-	return m.msg.Headers()
-}
-
-func (m *messageImpl[T]) Ack() error {
-	return m.msg.Ack()
-}
-
-func (m *messageImpl[T]) Nak() error {
-	return m.msg.Nak()
 }
 
 func (r *receiverImpl) subscribeJetStream(ctx context.Context, subject string) error {
@@ -470,7 +420,7 @@ func (r *receiverImpl) subscribeJetStream(ctx context.Context, subject string) e
 
 	// Create backlog channel for this consumer
 	// Buffered channel allows Consume callback to quickly spool messages without blocking
-	backlog := make(chan message, r.config.backlogSize)
+	backlog := make(chan Message, r.config.backlogSize)
 	r.msgBacklogs = append(r.msgBacklogs, backlog)
 
 	// Start worker goroutine to route messages from backlog by header
@@ -489,7 +439,7 @@ func (r *receiverImpl) subscribeJetStream(ctx context.Context, subject string) e
 		case backlog <- msg:
 		default:
 			if err := msg.Nak(); err != nil {
-				// TODO: pass to error handler
+				r.errorHandler(err)
 			}
 		}
 	})
@@ -502,38 +452,35 @@ func (r *receiverImpl) subscribeJetStream(ctx context.Context, subject string) e
 	return nil
 }
 
-func (r *receiverImpl) handleLogs(msg message) {
+func (r *receiverImpl) handleLogs(msg MessageSignal[logspb.LogsData]) {
 	r.wg.Add(1)
 	defer r.wg.Done()
 
 	ctx := context.Background()
-	msgT := MessageFrom[logspb.LogsData](msg)
-	handlerErr := r.logsMessageHandler(ctx, msgT)
+	handlerErr := r.logsMessageHandler(ctx, msg)
 	r.ackOrNak(msg, handlerErr)
 }
 
-func (r *receiverImpl) handleTraces(msg message) {
+func (r *receiverImpl) handleTraces(msg MessageSignal[tracespb.TracesData]) {
 	r.wg.Add(1)
 	defer r.wg.Done()
 
 	ctx := context.Background()
-	msgT := MessageFrom[tracespb.TracesData](msg)
-	handlerErr := r.tracesMessageHandler(ctx, msgT)
+	handlerErr := r.tracesMessageHandler(ctx, msg)
 	r.ackOrNak(msg, handlerErr)
 }
 
-func (r *receiverImpl) handleMetrics(msg message) {
+func (r *receiverImpl) handleMetrics(msg MessageSignal[metricspb.MetricsData]) {
 	r.wg.Add(1)
 	defer r.wg.Done()
 
 	ctx := context.Background()
-	msgT := MessageFrom[metricspb.MetricsData](msg)
-	handlerErr := r.metricsMessageHandler(ctx, msgT)
+	handlerErr := r.metricsMessageHandler(ctx, msg)
 	r.ackOrNak(msg, handlerErr)
 }
 
 // ackOrNak acknowledges or negatively acknowledges a message based on error.
-func (r *receiverImpl) ackOrNak(msg message, err error) {
+func (r *receiverImpl) ackOrNak(msg Message, err error) {
 	if err != nil {
 		if nakErr := msg.Nak(); nakErr != nil {
 			// Ignore "already acknowledged" errors - handler may have ack'd/nak'd manually
@@ -603,4 +550,58 @@ func (r *receiverImpl) Shutdown(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// messageCoreWrapper wraps a nats.Msg and provides generic typed access with lazy unmarshaling
+type messageCoreWrapper struct {
+	msg *nats.Msg
+}
+
+func (m *messageCoreWrapper) Subject() string {
+	return m.msg.Subject
+}
+
+func (m *messageCoreWrapper) Data() []byte {
+	return m.msg.Data
+}
+
+func (m *messageCoreWrapper) Headers() nats.Header {
+	return m.msg.Header
+}
+
+func (m *messageCoreWrapper) Ack() error {
+	return nil
+}
+
+func (m *messageCoreWrapper) Nak() error {
+	return nil
+}
+
+func (m *messageCoreWrapper) Term() error {
+	return nil
+}
+
+// messageSignalImpl wraps a message and provides generic typed access with lazy unmarshaling
+type messageSignalImpl[T any] struct {
+	Message
+	item    T
+	itemErr error
+	once    sync.Once
+}
+
+func (m *messageSignalImpl[T]) Item() (*T, error) {
+	m.once.Do(func() {
+		contentType := m.Headers().Get(HeaderContentType)
+		// T must be a proto.Message, so we need to convert it
+		// This works because logspb.LogsData, tracespb.TracesData, metricspb.MetricsData all implement proto.Message
+		if protoMsg, ok := any(&m.item).(proto.Message); ok {
+			m.itemErr = Unmarshal(m.Data(), contentType, protoMsg)
+			if m.itemErr != nil {
+				m.itemErr = fmt.Errorf("%w: %v", ErrUnmarshal, m.itemErr)
+			}
+		} else {
+			panic("invalid type T for MessageFrom, this is always a programming error")
+		}
+	})
+	return &m.item, m.itemErr
 }

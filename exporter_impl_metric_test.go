@@ -156,7 +156,7 @@ func TestMetricExporter_Roundtrip(t *testing.T) {
 	// Create receiver with handler
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("rt"),
-		WithReceiverMetricsHandler(func(ctx context.Context, msg Message[metricspb.MetricsData]) error {
+		WithReceiverMetricsHandler(func(ctx context.Context, msg MessageSignal[metricspb.MetricsData]) error {
 			data, err := msg.Item()
 			if err != nil {
 				return err

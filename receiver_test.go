@@ -46,7 +46,7 @@ func TestReceiver_MessageHandlerAPI(t *testing.T) {
 	// Create receiver with handler
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("mh"),
-		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
 			data, err := msg.Item()
 			if err != nil {
 				return err
@@ -102,7 +102,7 @@ func TestReceiver_QueueGroup(t *testing.T) {
 	recv1, err := NewReceiver(nc2,
 		WithReceiverSubjectPrefix("qg"),
 		WithReceiverQueueGroup("test-group"),
-		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
 			_, err := msg.Item()
 			if err != nil {
 				return err
@@ -116,7 +116,7 @@ func TestReceiver_QueueGroup(t *testing.T) {
 	recv2, err := NewReceiver(nc3,
 		WithReceiverSubjectPrefix("qg"),
 		WithReceiverQueueGroup("test-group"),
-		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
 			_, err := msg.Item()
 			if err != nil {
 				return err
@@ -165,7 +165,7 @@ func TestReceiver_Shutdown(t *testing.T) {
 	ctx := t.Context()
 
 	recv, err := NewReceiver(nc,
-		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
 			_, err := msg.Item()
 			if err != nil {
 				return err
@@ -228,7 +228,7 @@ func TestReceiver_JetStream(t *testing.T) {
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("jsrecv"),
 		WithReceiverJetStream(js, streamName),
-		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
 			data, err := msg.Item()
 			if err != nil {
 				return err
@@ -276,7 +276,7 @@ func TestReceiver_JetStream_DurableConsumer(t *testing.T) {
 		WithReceiverSubjectPrefix("jsdurable"),
 		WithReceiverJetStream(js, streamName),
 		WithReceiverConsumerName("test-consumer"),
-		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
 			data, err := msg.Item()
 			if err != nil {
 				return err
@@ -338,7 +338,7 @@ func TestReceiver_JetStream_NakOnError(t *testing.T) {
 		WithReceiverSubjectPrefix("jsnak"),
 		WithReceiverJetStream(js, streamName),
 		WithReceiverAckWait(500*time.Millisecond), // Short ack wait for faster test
-		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
 			_, err := msg.Item()
 			if err != nil {
 				return err
@@ -390,7 +390,7 @@ func TestReceiver_JetStream_QueueGroup(t *testing.T) {
 		WithReceiverSubjectPrefix("jsqg"),
 		WithReceiverJetStream(js2, streamName),
 		WithReceiverQueueGroup("test-group"),
-		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
 			_, err := msg.Item()
 			if err != nil {
 				return err
@@ -405,7 +405,7 @@ func TestReceiver_JetStream_QueueGroup(t *testing.T) {
 		WithReceiverSubjectPrefix("jsqg"),
 		WithReceiverJetStream(js3, streamName),
 		WithReceiverQueueGroup("test-group"),
-		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
 			_, err := msg.Item()
 			if err != nil {
 				return err
@@ -453,7 +453,7 @@ func TestReceiver_MessageHandler_TypedAccess(t *testing.T) {
 
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("msg"),
-		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
 			// Access typed data via Item()
 			data, err := msg.Item()
 			if err != nil {
@@ -497,7 +497,7 @@ func TestReceiver_MessageHandler_RawAccess(t *testing.T) {
 
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("raw"),
-		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
 			// Access raw bytes without unmarshaling
 			rawData := msg.Data()
 			receivedBytes.Store(&rawData)
@@ -548,7 +548,7 @@ func TestReceiver_MessageHandler_BothTypedAndRaw(t *testing.T) {
 
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("both"),
-		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
 			// Can access both in same handler
 			rawData := msg.Data()
 			if len(rawData) > 0 {
@@ -601,7 +601,7 @@ func TestReceiver_MessageHandler_ErrorHandling(t *testing.T) {
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("error"),
 		WithReceiverJetStream(js, streamName),
-		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
 			callCount.Add(1)
 
 			// Return error on first call, success on retry
@@ -644,7 +644,7 @@ func TestReceiver_MessageHandler_JetStream(t *testing.T) {
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("msgjs"),
 		WithReceiverJetStream(js, streamName),
-		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
 			data, err := msg.Item()
 			if err != nil {
 				return err
@@ -693,7 +693,7 @@ func TestReceiver_MessageHandler_CustomUnmarshal(t *testing.T) {
 
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("custom"),
-		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
 			// Can unmarshal raw bytes to custom type
 			var customData logspb.LogsData
 			contentType := msg.Headers().Get(HeaderContentType)
