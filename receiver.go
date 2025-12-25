@@ -265,7 +265,7 @@ func (r *receiverImpl) subscribe(ctx context.Context) error {
 
 	// Core NATS subscription - route messages by header
 	natsMsgHandler := func(msg *nats.Msg) {
-		r.routeMessage(&coreNatsMsg{msg: msg})
+		r.routeMessage(ctx, &coreNatsMsg{msg: msg})
 	}
 
 	var sub *nats.Subscription
@@ -306,7 +306,7 @@ func (m *coreNatsMsg) Nak() error {
 // routeMessage routes a message to the appropriate handler based on the Otel-Signal header.
 // For messages with unconfigured handlers, sends NAK to trigger redelivery.
 // For messages with unknown/missing signal headers, terminates the message.
-func (r *receiverImpl) routeMessage(msg message) {
+func (r *receiverImpl) routeMessage(ctx context.Context, msg message) {
 	signal := msg.Headers().Get(HeaderOtelSignal)
 
 	switch signal {
@@ -329,7 +329,7 @@ func (r *receiverImpl) routeMessage(msg message) {
 			_ = msg.Nak() // No handler configured, NAK for redelivery
 			return
 		}
-		r.handleMetrics(msg)
+		r.handleMetrics(ctx, msg)
 
 	default:
 		// Unknown or missing signal header - terminate the message
@@ -439,7 +439,7 @@ func (r *receiverImpl) subscribeJetStream(ctx context.Context, subject string) e
 	// Start worker goroutine to route messages from backlog by header
 	go func() {
 		for msg := range backlog {
-			r.routeMessage(msg)
+			r.routeMessage(ctx, msg)
 		}
 	}()
 
@@ -479,11 +479,10 @@ func (r *receiverImpl) handleTraces(msg message) {
 	r.ackOrNak(msg, handlerErr)
 }
 
-func (r *receiverImpl) handleMetrics(msg message) {
+func (r *receiverImpl) handleMetrics(ctx context.Context, msg message) {
 	r.wg.Add(1)
 	defer r.wg.Done()
 
-	ctx := context.Background()
 	msgT := MessageFrom[metricspb.MetricsData](msg)
 	handlerErr := r.metricsMessageHandler(ctx, msgT)
 	r.ackOrNak(msg, handlerErr)
