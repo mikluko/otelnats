@@ -8,9 +8,9 @@
 // # Exporters
 //
 // Exporters implement the standard OTel SDK interfaces:
-//   - [LogExporter] implements [go.opentelemetry.io/otel/sdk/log.Exporter]
-//   - [TraceExporter] implements [go.opentelemetry.io/otel/sdk/trace.SpanExporter]
-//   - [MetricExporter] implements [go.opentelemetry.io/otel/sdk/metric.Exporter]
+//   - [NewLogExporter] returns [go.opentelemetry.io/otel/sdk/log.Exporter]
+//   - [NewTraceExporter] returns [go.opentelemetry.io/otel/sdk/trace.SpanExporter]
+//   - [NewMetricExporter] returns [go.opentelemetry.io/otel/sdk/metric.Exporter]
 //
 // Exporters support both core NATS and JetStream publishing. Use [WithExporterJetStream]
 // for reliable delivery with persistence and at-least-once semantics.
