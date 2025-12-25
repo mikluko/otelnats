@@ -18,7 +18,7 @@ import (
 )
 
 type Message[T any] interface {
-	// Item must return ErrUnmarshall if the message data is invalid
+	// Item must return ErrUnmarshal if the message data is invalid
 	Item() (*T, error)
 	Data() []byte
 	Headers() nats.Header
@@ -361,7 +361,7 @@ func (m *messageImpl[T]) Item() (*T, error) {
 		if protoMsg, ok := any(&m.item).(proto.Message); ok {
 			m.itemErr = Unmarshal(m.msg.Data(), contentType, protoMsg)
 			if m.itemErr != nil {
-				m.itemErr = fmt.Errorf("%w: %v", ErrUnmarshall, m.itemErr)
+				m.itemErr = fmt.Errorf("%w: %v", ErrUnmarshal, m.itemErr)
 			}
 		} else {
 			panic("invalid type T for MessageFrom, this is always a programming error")
