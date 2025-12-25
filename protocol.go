@@ -139,25 +139,28 @@ func BuildHeaders(
 	return h
 }
 
-// PublishMessage publishes a NATS message using either core NATS or JetStream.
+// PublishMessage publishes a NATS message using the provided publisher.
 //
-// Publishing behavior:
-//   - If js is non-nil: Uses JetStream publishing with acknowledgment
-//   - If js is nil: Uses core NATS with flush timeout
-//
-// For core NATS, the timeout parameter controls how long to wait for the flush.
-// For JetStream, the timeout is controlled by the context deadline.
+// The publisher can be either a *nats.Conn (core NATS) or jetstream.JetStream.
+// For publishers that implement the flusher interface (e.g., *nats.Conn),
+// the message is flushed using FlushWithContext to ensure delivery.
 //
 // Example (core NATS):
 //
-//	err := PublishOtelMessage(ctx, conn, msg, nil, 5*time.Second)
+//	msg := &nats.Msg{
+//	    Subject: "otel.traces",
+//	    Data:    data,
+//	    Header:  headers,
+//	}
+//	err := PublishMessage(ctx, conn, msg)
 //
 // Example (JetStream):
 //
 //	js, _ := jetstream.New(conn)
-//	err := PublishOtelMessage(ctx, conn, msg, js, 0)
+//	_, err := js.PublishMsg(ctx, msg)
 //
-// PublishMessage publishes core NATS message
+// Note: For JetStream, you typically use js.PublishMsg directly to get
+// the PublishAck. This function is primarily designed for core NATS usage.
 func PublishMessage(
 	ctx context.Context,
 	pub publisher,
