@@ -47,11 +47,8 @@ type Receiver struct {
 	// Core NATS subscriptions
 	subs []*nats.Subscription
 
-	// JetStream consumers
-	consumers []jetstream.Consumer
-
-	// Shutdown signaling for fetch loops
-	done chan struct{}
+	// JetStream consumers and their contexts
+	consumeContexts []jetstream.ConsumeContext
 
 	// In-flight message tracking
 	wg sync.WaitGroup
@@ -277,11 +274,6 @@ func (r *Receiver) Start(ctx context.Context) error {
 		return nil
 	}
 
-	// Initialize done channel for JetStream fetch loops
-	if r.config.jetstream != nil {
-		r.done = make(chan struct{})
-	}
-
 	// Subscribe to logs if handler or channel is set
 	if r.logsHandler != nil || r.logsCh != nil {
 		if err := r.subscribe(ctx, SignalLogs, r.handleLogs); err != nil {
@@ -423,49 +415,18 @@ func (r *Receiver) subscribeJetStream(ctx context.Context, subject string, handl
 		}
 	}
 
-	r.consumers = append(r.consumers, consumer)
+	// Start consuming messages using the Consume API
+	// This provides continuous message delivery with built-in lifecycle management
+	consumeCtx, err := consumer.Consume(func(msg jetstream.Msg) {
+		handler(msg)
+	})
+	if err != nil {
+		return err
+	}
 
-	// Start fetch loop goroutine
-	r.wg.Add(1)
-	go r.fetchLoop(consumer, handler)
+	r.consumeContexts = append(r.consumeContexts, consumeCtx)
 
 	return nil
-}
-
-func (r *Receiver) fetchLoop(consumer jetstream.Consumer, handler msgHandler) {
-	defer r.wg.Done()
-
-	for {
-		select {
-		case <-r.done:
-			return
-		default:
-		}
-
-		msgs, err := consumer.Fetch(r.config.fetchBatchSize, jetstream.FetchMaxWait(r.config.fetchTimeout))
-		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, jetstream.ErrNoMessages) {
-				continue // Normal timeout, try again
-			}
-			// Check if we're shutting down
-			select {
-			case <-r.done:
-				return
-			default:
-				continue // Other error, retry
-			}
-		}
-
-		for msg := range msgs.Messages() {
-			handler(msg)
-		}
-
-		// Check for fetch errors
-		if msgs.Error() != nil {
-			// Log or handle error if needed
-			continue
-		}
-	}
 }
 
 func (r *Receiver) handleLogs(msg message) {
@@ -573,17 +534,18 @@ func (r *Receiver) Shutdown(ctx context.Context) error {
 	r.shutdown = true
 	subs := r.subs
 	r.subs = nil
-	r.consumers = nil
-
-	// Signal fetch loops to stop
-	if r.done != nil {
-		close(r.done)
-	}
+	consumeContexts := r.consumeContexts
+	r.consumeContexts = nil
 	r.mu.Unlock()
 
 	// Unsubscribe core NATS subscriptions
 	for _, sub := range subs {
 		_ = sub.Unsubscribe()
+	}
+
+	// Drain JetStream consume contexts to stop message delivery gracefully
+	for _, cc := range consumeContexts {
+		cc.Drain()
 	}
 
 	// Wait for in-flight messages with context timeout
