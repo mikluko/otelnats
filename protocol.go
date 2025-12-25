@@ -115,7 +115,7 @@ func Unmarshal(data []byte, contentType string, m proto.Message) error {
 //
 // Example:
 //
-//	headers := BuildOtelHeaders(ctx, SignalTraces, EncodingProtobuf, func(ctx context.Context) nats.Header {
+//	headers := BuildHeaders(ctx, SignalTraces, EncodingProtobuf, func(ctx context.Context) nats.Header {
 //	    return nats.Header{"X-Tenant-ID": []string{"tenant-a"}}
 //	})
 func BuildHeaders(
