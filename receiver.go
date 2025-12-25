@@ -53,6 +53,9 @@ type receiverImpl struct {
 	// JetStream consumers and their contexts
 	consumeContexts []jetstream.ConsumeContext
 
+	// Message backlog channels for JetStream
+	msgBacklogs []chan message
+
 	// In-flight message tracking
 	wg sync.WaitGroup
 }
@@ -68,6 +71,7 @@ type receiverConfig struct {
 	consumerName string
 	consumer     jetstream.Consumer // pre-created consumer from WithReceiverConsumer
 	ackWait      time.Duration
+	backlogSize  int
 
 	// handlers
 	logsHandler    MessageHandler[logspb.LogsData]
@@ -80,15 +84,11 @@ func defaultReceiverConfig() *receiverConfig {
 		subjectPrefix: defaultSubjectPrefix,
 		queueGroup:    "",
 		ackWait:       30 * time.Second,
-		logsHandler: func(ctx context.Context, msg Message[logspb.LogsData]) error {
-			return nil // No-op handler by default
-		},
-		tracesHandler: func(ctx context.Context, msg Message[tracespb.TracesData]) error {
-			return nil
-		},
-		metricsHandler: func(ctx context.Context, msg Message[metricspb.MetricsData]) error {
-			return nil
-		},
+		backlogSize:   100,
+		// Handlers default to nil - only subscribe if explicitly set
+		logsHandler:    nil,
+		tracesHandler:  nil,
+		metricsHandler: nil,
 	}
 }
 
@@ -163,6 +163,17 @@ func WithReceiverConsumer(consumer jetstream.Consumer) ReceiverOption {
 func WithReceiverAckWait(d time.Duration) ReceiverOption {
 	return func(c *receiverConfig) {
 		c.ackWait = d
+	}
+}
+
+// WithReceiverBacklogSize sets the buffer size for the message backlog channel.
+// This channel buffers messages between the JetStream Consume callback and the
+// handler goroutine. A larger buffer allows the Consume callback to accept more
+// messages without blocking, but uses more memory. The default is 100.
+// Only applies when JetStream is enabled via [WithReceiverJetStream].
+func WithReceiverBacklogSize(size int) ReceiverOption {
+	return func(c *receiverConfig) {
+		c.backlogSize = size
 	}
 }
 
@@ -395,14 +406,25 @@ func (r *receiverImpl) subscribeJetStream(ctx context.Context, subject string, h
 		}
 	}
 
+	// Create backlog channel for this consumer
+	// Buffered channel allows Consume callback to quickly spool messages without blocking
+	backlog := make(chan message, r.config.backlogSize)
+	r.msgBacklogs = append(r.msgBacklogs, backlog)
+
+	// Start worker goroutine to process messages from backlog
+	go func() {
+		for msg := range backlog {
+			handler(msg)
+		}
+	}()
+
 	// Start consuming messages using the Consume API
-	// This provides continuous message delivery with built-in lifecycle management
+	// Messages are spooled into backlog channel for async processing
 	consumeCtx, err := consumer.Consume(func(msg jetstream.Msg) {
-		handler(msg)
-	}, jetstream.ConsumeErrHandler(func(consumeCtx jetstream.ConsumeContext, err error) {
-		// Log consume errors but don't stop (consumer will retry)
-		_ = err
-	}))
+		// Spool message into backlog channel
+		// This returns quickly, preventing Consume callback from blocking
+		backlog <- msg
+	})
 	if err != nil {
 		return err
 	}
@@ -463,6 +485,8 @@ func (r *receiverImpl) Shutdown(ctx context.Context) error {
 	r.subs = nil
 	consumeContexts := r.consumeContexts
 	r.consumeContexts = nil
+	msgBacklogs := r.msgBacklogs
+	r.msgBacklogs = nil
 	r.mu.Unlock()
 
 	// Unsubscribe core NATS subscriptions
@@ -486,6 +510,11 @@ func (r *receiverImpl) Shutdown(ctx context.Context) error {
 	case <-done:
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+
+	// Close backlog channels to allow worker goroutines to exit
+	for _, backlog := range msgBacklogs {
+		close(backlog)
 	}
 
 	return nil
