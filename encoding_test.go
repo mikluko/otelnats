@@ -36,8 +36,8 @@ func TestJSONEncoding_LogExporter(t *testing.T) {
 		msg := requireMessage(t, sub, 5*time.Second)
 
 		// Check Content-Type header is JSON
-		require.Equal(t, contentTypeJSON, msg.Header.Get(headerContentType))
-		require.Equal(t, signalLogs, msg.Header.Get(headerOtelSignal))
+		require.Equal(t, ContentTypeJSON, msg.Header.Get(HeaderContentType))
+		require.Equal(t, SignalLogs, msg.Header.Get(HeaderOtelSignal))
 
 		// Verify payload is valid JSON (not protobuf)
 		var logsData logspb.LogsData
@@ -120,8 +120,8 @@ func TestJSONEncoding_TraceExporter(t *testing.T) {
 	msg := requireMessage(t, sub, 5*time.Second)
 
 	// Check Content-Type header is JSON
-	require.Equal(t, contentTypeJSON, msg.Header.Get(headerContentType))
-	require.Equal(t, signalTraces, msg.Header.Get(headerOtelSignal))
+	require.Equal(t, ContentTypeJSON, msg.Header.Get(HeaderContentType))
+	require.Equal(t, SignalTraces, msg.Header.Get(HeaderOtelSignal))
 }
 
 func TestJSONEncoding_MetricExporter(t *testing.T) {
@@ -146,8 +146,8 @@ func TestJSONEncoding_MetricExporter(t *testing.T) {
 	msg := requireMessage(t, sub, 5*time.Second)
 
 	// Check Content-Type header is JSON
-	require.Equal(t, contentTypeJSON, msg.Header.Get(headerContentType))
-	require.Equal(t, signalMetrics, msg.Header.Get(headerOtelSignal))
+	require.Equal(t, ContentTypeJSON, msg.Header.Get(HeaderContentType))
+	require.Equal(t, SignalMetrics, msg.Header.Get(HeaderOtelSignal))
 }
 
 func TestMixedEncoding_ReceiverAutoDetects(t *testing.T) {

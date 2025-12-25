@@ -20,8 +20,8 @@ func OTLPSubjects(prefix string, suffix ...string) []string {
 		sfx = "." + suffix[0]
 	}
 	return []string{
-		prefix + "." + signalLogs + sfx,
-		prefix + "." + signalTraces + sfx,
-		prefix + "." + signalMetrics + sfx,
+		prefix + "." + SignalLogs + sfx,
+		prefix + "." + SignalTraces + sfx,
+		prefix + "." + SignalMetrics + sfx,
 	}
 }
