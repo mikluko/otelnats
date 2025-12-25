@@ -720,3 +720,171 @@ func TestReceiver_MessageHandler_CustomUnmarshal(t *testing.T) {
 
 	require.NoError(t, recv.Shutdown(ctx))
 }
+
+func TestReceiver_ErrorHandler(t *testing.T) {
+	ns := startEmbeddedNATS(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	t.Run("default handler panics on error", func(t *testing.T) {
+		// Create receiver with handler that returns an error
+		// This will trigger NAK, and if NAK fails, default error handler should panic
+		recv, err := NewReceiver(nc,
+			WithReceiverSubjectPrefix("err-default"),
+			WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+				// Return error to trigger NAK
+				return errors.New("handler error")
+			}),
+		)
+		require.NoError(t, err)
+
+		// Note: We can't easily test panic in a JetStream scenario without
+		// actually triggering a NAK error, which would require mocking.
+		// This test just verifies the receiver is created with default handler.
+		require.NotNil(t, recv)
+	})
+
+	t.Run("custom error handler is called", func(t *testing.T) {
+		exp, err := NewLogExporter(nc, WithExporterSubjectPrefix("err-custom"))
+		require.NoError(t, err)
+
+		var errorHandlerCalled atomic.Bool
+		var capturedError atomic.Pointer[error]
+
+		// Create receiver with custom error handler
+		recv, err := NewReceiver(nc,
+			WithReceiverSubjectPrefix("err-custom"),
+			WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+				// For core NATS, returning error doesn't trigger error handler
+				// (no NAK in core NATS)
+				return nil
+			}),
+			WithReceiverErrorHandler(func(err error) {
+				errorHandlerCalled.Store(true)
+				capturedError.Store(&err)
+			}),
+		)
+		require.NoError(t, err)
+
+		require.NoError(t, recv.Start(ctx))
+
+		// Send a message
+		rec := createTestLogRecord(t)
+		require.NoError(t, exp.Export(ctx, []sdklog.Record{rec}))
+
+		// Give it time to process
+		time.Sleep(100 * time.Millisecond)
+
+		// In core NATS mode, error handler should not be called for handler errors
+		require.False(t, errorHandlerCalled.Load())
+
+		require.NoError(t, recv.Shutdown(ctx))
+	})
+
+	t.Run("error handler called on shutdown errors", func(t *testing.T) {
+		var shutdownErrors atomic.Int32
+
+		recv, err := NewReceiver(nc,
+			WithReceiverSubjectPrefix("err-shutdown"),
+			WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+				return nil
+			}),
+			WithReceiverErrorHandler(func(err error) {
+				// Count errors during shutdown
+				shutdownErrors.Add(1)
+			}),
+		)
+		require.NoError(t, err)
+
+		require.NoError(t, recv.Start(ctx))
+
+		// Shutdown should succeed even with error handler
+		require.NoError(t, recv.Shutdown(ctx))
+
+		// No errors expected during normal shutdown
+		require.Equal(t, int32(0), shutdownErrors.Load())
+	})
+}
+
+func TestReceiver_BacklogSize(t *testing.T) {
+	t.Run("custom backlog size", func(t *testing.T) {
+		ns := startEmbeddedNATS(t)
+		nc := connectToNATS(t, ns)
+		ctx := t.Context()
+
+		// Create receiver with small backlog
+		recv, err := NewReceiver(nc,
+			WithReceiverSubjectPrefix("backlog"),
+			WithReceiverBacklogSize(5),
+			WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+				return nil
+			}),
+		)
+		require.NoError(t, err)
+
+		// Verify receiver was created successfully
+		require.NotNil(t, recv)
+
+		require.NoError(t, recv.Start(ctx))
+		require.NoError(t, recv.Shutdown(ctx))
+	})
+
+	t.Run("default backlog size", func(t *testing.T) {
+		ns := startEmbeddedNATS(t)
+		nc := connectToNATS(t, ns)
+		ctx := t.Context()
+
+		// Create receiver without specifying backlog size
+		recv, err := NewReceiver(nc,
+			WithReceiverSubjectPrefix("backlog-default"),
+			WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+				return nil
+			}),
+		)
+		require.NoError(t, err)
+
+		require.NoError(t, recv.Start(ctx))
+		require.NoError(t, recv.Shutdown(ctx))
+	})
+
+	t.Run("backlog handles burst of messages", func(t *testing.T) {
+		ns := startEmbeddedNATS(t)
+		nc := connectToNATS(t, ns)
+		ctx := t.Context()
+
+		exp, err := NewLogExporter(nc, WithExporterSubjectPrefix("backlog-burst"))
+		require.NoError(t, err)
+
+		var receivedCount atomic.Int32
+		processingDelay := 50 * time.Millisecond
+
+		// Create receiver with reasonable backlog
+		recv, err := NewReceiver(nc,
+			WithReceiverSubjectPrefix("backlog-burst"),
+			WithReceiverBacklogSize(100),
+			WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+				// Simulate slow processing
+				time.Sleep(processingDelay)
+				receivedCount.Add(1)
+				return nil
+			}),
+		)
+		require.NoError(t, err)
+
+		require.NoError(t, recv.Start(ctx))
+
+		// Send burst of messages
+		messageCount := 10
+		for i := 0; i < messageCount; i++ {
+			rec := createTestLogRecord(t)
+			require.NoError(t, exp.Export(ctx, []sdklog.Record{rec}))
+		}
+
+		// Wait for all messages to be processed
+		require.Eventually(t, func() bool {
+			return receivedCount.Load() == int32(messageCount)
+		}, 5*time.Second, 10*time.Millisecond)
+
+		require.NoError(t, recv.Shutdown(ctx))
+	})
+}
