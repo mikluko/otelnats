@@ -85,27 +85,22 @@ func main() {
 	nc, _ := nats.Connect(nats.DefaultURL)
 	defer nc.Close()
 
-	recv, _ := otelnats.NewReceiver(nc)
-
-	// Callback API
-	recv.OnLogs(func(ctx context.Context, data *logspb.LogsData) error {
-		for _, rl := range data.ResourceLogs {
-			for _, sl := range rl.ScopeLogs {
-				for _, lr := range sl.LogRecords {
-					fmt.Printf("[%s] %s\n", lr.SeverityText, lr.Body.GetStringValue())
+	recv, _ := otelnats.NewReceiver(nc,
+		otelnats.WithReceiverLogsHandler(func(ctx context.Context, msg otelnats.Message[logspb.LogsData]) error {
+			data, err := msg.Item()
+			if err != nil {
+				return err
+			}
+			for _, rl := range data.ResourceLogs {
+				for _, sl := range rl.ScopeLogs {
+					for _, lr := range sl.LogRecords {
+						fmt.Printf("[%s] %s\n", lr.SeverityText, lr.Body.GetStringValue())
+					}
 				}
 			}
-		}
-		return nil
-	})
-
-	// Or channel API
-	tracesCh := recv.Traces()
-	go func() {
-		for data := range tracesCh {
-			fmt.Printf("Received %d spans\n", countSpans(data))
-		}
-	}()
+			return nil
+		}),
+	)
 
 	recv.Start(context.Background())
 	defer recv.Shutdown(context.Background())
@@ -159,19 +154,89 @@ otelnats.NewReceiver(nc, otelnats.WithReceiverSubjectSuffix(">"))
 // Subscribes to: otel.logs.>, otel.traces.>, otel.metrics.>
 
 // Queue group for load balancing
-otelnats.NewReceiver(nc, otelnats.WithQueueGroup("processors"))
+otelnats.NewReceiver(nc, otelnats.WithReceiverQueueGroup("processors"))
 
-// Channel buffer size (default: 100)
-otelnats.NewReceiver(nc, otelnats.WithChannelBufferSize(1000))
-
-// JetStream consumption (at-least-once delivery with pull consumers)
+// JetStream consumption (at-least-once delivery)
 js, _ := jetstream.New(nc)
 otelnats.NewReceiver(nc,
     otelnats.WithReceiverJetStream(js, "TELEMETRY"),  // stream name
-    otelnats.WithConsumerName("processor-1"),         // durable consumer
-    otelnats.WithAckWait(30*time.Second),             // ack timeout (default: 30s)
-    otelnats.WithFetchBatchSize(100),                 // messages per fetch (default: 10)
-    otelnats.WithFetchTimeout(10*time.Second),        // fetch wait time (default: 5s)
+    otelnats.WithReceiverConsumerName("processor-1"), // durable consumer
+    otelnats.WithReceiverAckWait(30*time.Second),     // ack timeout (default: 30s)
+)
+```
+
+### Advanced Message Handling
+
+For performance-critical or custom processing scenarios, use the generic `MessageHandler` API which provides access to both typed data and raw message bytes:
+
+```go
+recv, _ := otelnats.NewReceiver(nc,
+    otelnats.WithReceiverLogsHandler(func(ctx context.Context, msg otelnats.Message[logspb.LogsData]) error {
+        // Option 1: Access typed data (lazy unmarshaling)
+        data, err := msg.Item()
+        if err != nil {
+            return err
+        }
+        for _, rl := range data.ResourceLogs {
+            // Process logs...
+        }
+
+        // Option 2: Access raw bytes without unmarshaling
+        rawBytes := msg.Data()
+
+        // Access headers
+        contentType := msg.Headers().Get(otelnats.HeaderContentType)
+
+        // JetStream: explicit acknowledgment (optional, automatic by default)
+        return msg.Ack()  // or msg.Nak() on error
+    }),
+)
+```
+
+**Use Cases:**
+
+**1. Performance optimization** — Avoid double unmarshaling:
+```go
+recv, _ := otelnats.NewReceiver(nc,
+    otelnats.WithReceiverLogsHandler(func(ctx context.Context, msg otelnats.Message[logspb.LogsData]) error {
+        // Access raw bytes to pass to downstream processor without unmarshaling
+        return forwardToProcessor(msg.Data(), msg.Headers())
+    }),
+)
+```
+
+**2. Custom unmarshaling** — Unmarshal to different types:
+```go
+recv, _ := otelnats.NewReceiver(nc,
+    otelnats.WithReceiverLogsHandler(func(ctx context.Context, msg otelnats.Message[logspb.LogsData]) error {
+        // Unmarshal to custom type for collector implementations
+        var customData MyCustomLogsFormat
+        contentType := msg.Headers().Get(otelnats.HeaderContentType)
+        if err := otelnats.Unmarshal(msg.Data(), contentType, &customData); err != nil {
+            return err
+        }
+        return processCustomFormat(customData)
+    }),
+)
+```
+
+**3. Conditional processing** — Inspect headers before unmarshaling:
+```go
+recv, _ := otelnats.NewReceiver(nc,
+    otelnats.WithReceiverLogsHandler(func(ctx context.Context, msg otelnats.Message[logspb.LogsData]) error {
+        // Check headers first
+        tenant := msg.Headers().Get("X-Tenant-ID")
+        if !shouldProcess(tenant) {
+            return nil  // Skip processing
+        }
+
+        // Only unmarshal when needed
+        data, err := msg.Item()
+        if err != nil {
+            return err
+        }
+        return processTenantLogs(tenant, data)
+    }),
 )
 ```
 
@@ -214,7 +279,7 @@ consumer, _ := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
 // Bind consumer to receiver
 recv, _ := otelnats.NewReceiver(nc,
     otelnats.WithReceiverJetStream(js, "TELEMETRY"),
-    otelnats.WithConsumer(consumer),
+    otelnats.WithReceiverConsumer(consumer),
 )
 ```
 
@@ -254,24 +319,30 @@ All exporters implement their respective OTel SDK interfaces:
 ### Receiver
 
 ```go
-type Receiver struct { ... }
+type Receiver interface {
+    Start(ctx context.Context) error
+    Shutdown(ctx context.Context) error
+}
 
 // Constructor
-func NewReceiver(nc *nats.Conn, opts ...ReceiverOption) (*Receiver, error)
+func NewReceiver(nc *nats.Conn, opts ...ReceiverOption) (Receiver, error)
 
-// Callback registration (call before Start)
-func (r *Receiver) OnLogs(fn func (context.Context, *logspb.LogsData) error)
-func (r *Receiver) OnTraces(fn func (context.Context, *tracespb.TracesData) error)
-func (r *Receiver) OnMetrics(fn func (context.Context, *metricspb.MetricsData) error)
+// Message interface
+type Message[T any] interface {
+    Item() (*T, error)    // Access typed data (lazy unmarshal)
+    Data() []byte         // Access raw message bytes
+    Headers() nats.Header // Access message headers
+    Ack() error          // Acknowledge (JetStream only)
+    Nak() error          // Negative acknowledge (JetStream only)
+}
 
-// Channel API (call before Start)
-func (r *Receiver) Logs() <-chan *logspb.LogsData
-func (r *Receiver) Traces() <-chan *tracespb.TracesData
-func (r *Receiver) Metrics() <-chan *metricspb.MetricsData
+// Message handler type
+type MessageHandler[T any] func(ctx context.Context, msg Message[T]) error
 
-// Lifecycle
-func (r *Receiver) Start(ctx context.Context) error
-func (r *Receiver) Shutdown(ctx context.Context) error
+// Handler options (passed to NewReceiver)
+func WithReceiverLogsHandler(fn MessageHandler[logspb.LogsData]) ReceiverOption
+func WithReceiverTracesHandler(fn MessageHandler[tracespb.TracesData]) ReceiverOption
+func WithReceiverMetricsHandler(fn MessageHandler[metricspb.MetricsData]) ReceiverOption
 ```
 
 ### Protocol Primitives

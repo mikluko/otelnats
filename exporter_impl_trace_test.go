@@ -21,7 +21,7 @@ func TestNewTraceExporter(t *testing.T) {
 		exp, err := NewTraceExporter(nil)
 		require.Error(t, err)
 		require.Nil(t, exp)
-		require.Equal(t, errNilConnection, err)
+		require.Equal(t, ErrNilConnection, err)
 	})
 
 	t.Run("valid connection succeeds", func(t *testing.T) {
@@ -51,7 +51,7 @@ func TestTraceExporter_ExportSpans(t *testing.T) {
 	})
 
 	t.Run("exports spans with correct subject and headers", func(t *testing.T) {
-		exp, err := NewTraceExporter(nc, WithSubjectPrefix("test"))
+		exp, err := NewTraceExporter(nc, WithExporterSubjectPrefix("test"))
 		require.NoError(t, err)
 
 		// Subscribe to receive the message
@@ -113,7 +113,7 @@ func TestTraceExporter_SpanGrouping(t *testing.T) {
 	nc := connectToNATS(t, ns)
 	ctx := t.Context()
 
-	exp, err := NewTraceExporter(nc, WithSubjectPrefix("group"))
+	exp, err := NewTraceExporter(nc, WithExporterSubjectPrefix("group"))
 	require.NoError(t, err)
 
 	sub, err := nc.SubscribeSync("group.traces")
@@ -144,19 +144,26 @@ func TestTraceExporter_Roundtrip(t *testing.T) {
 	nc := connectToNATS(t, ns)
 	ctx := t.Context()
 
-	// Create exporter and receiver
-	exp, err := NewTraceExporter(nc, WithSubjectPrefix("rt"))
-	require.NoError(t, err)
-
-	recv, err := NewReceiver(nc, WithReceiverSubjectPrefix("rt"))
+	// Create exporter
+	exp, err := NewTraceExporter(nc, WithExporterSubjectPrefix("rt"))
 	require.NoError(t, err)
 
 	// Track received data
 	received := make(chan *tracepb.TracesData, 1)
-	recv.OnTraces(func(ctx context.Context, data *tracepb.TracesData) error {
-		received <- data
-		return nil
-	})
+
+	// Create receiver with handler
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("rt"),
+		WithReceiverTracesHandler(func(ctx context.Context, msg Message[tracepb.TracesData]) error {
+			data, err := msg.Item()
+			if err != nil {
+				return err
+			}
+			received <- data
+			return nil
+		}),
+	)
+	require.NoError(t, err)
 
 	require.NoError(t, recv.Start(ctx))
 	defer recv.Shutdown(ctx)

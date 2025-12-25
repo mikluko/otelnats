@@ -20,8 +20,8 @@ func TestJSONEncoding_LogExporter(t *testing.T) {
 
 	t.Run("exports with JSON encoding and correct content-type", func(t *testing.T) {
 		exp, err := NewLogExporter(nc,
-			WithSubjectPrefix("json"),
-			WithEncoding(EncodingJSON),
+			WithExporterSubjectPrefix("json"),
+			WithExporterEncoding(EncodingJSON),
 		)
 		require.NoError(t, err)
 
@@ -60,22 +60,26 @@ func TestJSONEncoding_Roundtrip(t *testing.T) {
 
 	// Create exporter with JSON encoding
 	exp, err := NewLogExporter(nc,
-		WithSubjectPrefix("jsonrt"),
-		WithEncoding(EncodingJSON),
+		WithExporterSubjectPrefix("jsonrt"),
+		WithExporterEncoding(EncodingJSON),
 	)
 	require.NoError(t, err)
 
 	// Create receiver (auto-detects encoding from Content-Type)
+	received := make(chan *logspb.LogsData, 1)
+
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("jsonrt"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			data, err := msg.Item()
+			if err != nil {
+				return err
+			}
+			received <- data
+			return nil
+		}),
 	)
 	require.NoError(t, err)
-
-	received := make(chan *logspb.LogsData, 1)
-	recv.OnLogs(func(_ context.Context, data *logspb.LogsData) error {
-		received <- data
-		return nil
-	})
 
 	require.NoError(t, recv.Start(ctx))
 	defer recv.Shutdown(ctx)
@@ -104,8 +108,8 @@ func TestJSONEncoding_TraceExporter(t *testing.T) {
 	ctx := t.Context()
 
 	exp, err := NewTraceExporter(nc,
-		WithSubjectPrefix("jsontrace"),
-		WithEncoding(EncodingJSON),
+		WithExporterSubjectPrefix("jsontrace"),
+		WithExporterEncoding(EncodingJSON),
 	)
 	require.NoError(t, err)
 
@@ -130,8 +134,8 @@ func TestJSONEncoding_MetricExporter(t *testing.T) {
 	ctx := t.Context()
 
 	exp, err := NewMetricExporter(nc,
-		WithSubjectPrefix("jsonmetric"),
-		WithEncoding(EncodingJSON),
+		WithExporterSubjectPrefix("jsonmetric"),
+		WithExporterEncoding(EncodingJSON),
 	)
 	require.NoError(t, err)
 
@@ -157,28 +161,32 @@ func TestMixedEncoding_ReceiverAutoDetects(t *testing.T) {
 
 	// Create two exporters: one protobuf, one JSON
 	expProto, err := NewLogExporter(nc,
-		WithSubjectPrefix("mixed"),
-		WithEncoding(EncodingProtobuf),
+		WithExporterSubjectPrefix("mixed"),
+		WithExporterEncoding(EncodingProtobuf),
 	)
 	require.NoError(t, err)
 
 	expJSON, err := NewLogExporter(nc,
-		WithSubjectPrefix("mixed"),
-		WithEncoding(EncodingJSON),
+		WithExporterSubjectPrefix("mixed"),
+		WithExporterEncoding(EncodingJSON),
 	)
 	require.NoError(t, err)
 
 	// Create receiver (should handle both)
+	received := make(chan *logspb.LogsData, 10)
+
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("mixed"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			data, err := msg.Item()
+			if err != nil {
+				return err
+			}
+			received <- data
+			return nil
+		}),
 	)
 	require.NoError(t, err)
-
-	received := make(chan *logspb.LogsData, 10)
-	recv.OnLogs(func(_ context.Context, data *logspb.LogsData) error {
-		received <- data
-		return nil
-	})
 
 	require.NoError(t, recv.Start(ctx))
 	defer recv.Shutdown(ctx)

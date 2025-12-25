@@ -18,7 +18,7 @@ func TestNewReceiver(t *testing.T) {
 		recv, err := NewReceiver(nil)
 		require.Error(t, err)
 		require.Nil(t, recv)
-		require.Equal(t, errNilConnection, err)
+		require.Equal(t, ErrNilConnection, err)
 	})
 
 	t.Run("valid connection succeeds", func(t *testing.T) {
@@ -31,24 +31,31 @@ func TestNewReceiver(t *testing.T) {
 	})
 }
 
-func TestReceiver_CallbackAPI(t *testing.T) {
+func TestReceiver_MessageHandlerAPI(t *testing.T) {
 	ns := startEmbeddedNATS(t)
 	nc := connectToNATS(t, ns)
 	ctx := t.Context()
 
-	// Create exporter and receiver
-	exp, err := NewLogExporter(nc, WithSubjectPrefix("cb"))
-	require.NoError(t, err)
-
-	recv, err := NewReceiver(nc, WithReceiverSubjectPrefix("cb"))
+	// Create exporter
+	exp, err := NewLogExporter(nc, WithExporterSubjectPrefix("mh"))
 	require.NoError(t, err)
 
 	// Track received data
 	var received atomic.Pointer[logspb.LogsData]
-	recv.OnLogs(func(ctx context.Context, data *logspb.LogsData) error {
-		received.Store(data)
-		return nil
-	})
+
+	// Create receiver with handler
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("mh"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			data, err := msg.Item()
+			if err != nil {
+				return err
+			}
+			received.Store(data)
+			return nil
+		}),
+	)
+	require.NoError(t, err)
 
 	// Start receiver
 	err = recv.Start(ctx)
@@ -78,50 +85,6 @@ func TestReceiver_CallbackAPI(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestReceiver_ChannelAPI(t *testing.T) {
-	ns := startEmbeddedNATS(t)
-	nc := connectToNATS(t, ns)
-	ctx := t.Context()
-
-	// Create exporter and receiver
-	exp, err := NewLogExporter(nc, WithSubjectPrefix("ch"))
-	require.NoError(t, err)
-
-	recv, err := NewReceiver(nc, WithReceiverSubjectPrefix("ch"))
-	require.NoError(t, err)
-
-	// Get channel before start
-	logsCh := recv.Logs()
-	require.NotNil(t, logsCh)
-
-	// Start receiver
-	err = recv.Start(ctx)
-	require.NoError(t, err)
-
-	// Export a log record
-	rec := createTestLogRecord(t)
-	err = exp.Export(ctx, []sdklog.Record{rec})
-	require.NoError(t, err)
-
-	// Receive from channel
-	select {
-	case data := <-logsCh:
-		require.Len(t, data.ResourceLogs, 1)
-		lr := data.ResourceLogs[0].ScopeLogs[0].LogRecords[0]
-		require.Equal(t, "test message", lr.Body.GetStringValue())
-	case <-time.After(5 * time.Second):
-		t.Fatal("timeout waiting for message")
-	}
-
-	// Shutdown
-	err = recv.Shutdown(ctx)
-	require.NoError(t, err)
-
-	// Channel should be closed
-	_, ok := <-logsCh
-	require.False(t, ok, "channel should be closed after shutdown")
-}
-
 func TestReceiver_QueueGroup(t *testing.T) {
 	ns := startEmbeddedNATS(t)
 	nc1 := connectToNATS(t, ns)
@@ -130,7 +93,7 @@ func TestReceiver_QueueGroup(t *testing.T) {
 	ctx := t.Context()
 
 	// Create exporter
-	exp, err := NewLogExporter(nc1, WithSubjectPrefix("qg"))
+	exp, err := NewLogExporter(nc1, WithExporterSubjectPrefix("qg"))
 	require.NoError(t, err)
 
 	// Create two receivers in same queue group
@@ -138,23 +101,32 @@ func TestReceiver_QueueGroup(t *testing.T) {
 
 	recv1, err := NewReceiver(nc2,
 		WithReceiverSubjectPrefix("qg"),
-		WithQueueGroup("test-group"),
+		WithReceiverQueueGroup("test-group"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			_, err := msg.Item()
+			if err != nil {
+				return err
+			}
+			count1.Add(1)
+			return nil
+		}),
 	)
 	require.NoError(t, err)
-	recv1.OnLogs(func(ctx context.Context, data *logspb.LogsData) error {
-		count1.Add(1)
-		return nil
-	})
 
 	recv2, err := NewReceiver(nc3,
 		WithReceiverSubjectPrefix("qg"),
-		WithQueueGroup("test-group"),
+		WithReceiverQueueGroup("test-group"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			_, err := msg.Item()
+			if err != nil {
+				return err
+			}
+
+			count2.Add(1)
+			return nil
+		}),
 	)
 	require.NoError(t, err)
-	recv2.OnLogs(func(ctx context.Context, data *logspb.LogsData) error {
-		count2.Add(1)
-		return nil
-	})
 
 	// Start receivers
 	require.NoError(t, recv1.Start(ctx))
@@ -192,12 +164,17 @@ func TestReceiver_Shutdown(t *testing.T) {
 	nc := connectToNATS(t, ns)
 	ctx := t.Context()
 
-	recv, err := NewReceiver(nc)
-	require.NoError(t, err)
+	recv, err := NewReceiver(nc,
+		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			_, err := msg.Item()
+			if err != nil {
+				return err
+			}
 
-	recv.OnLogs(func(ctx context.Context, data *logspb.LogsData) error {
-		return nil
-	})
+			return nil
+		}),
+	)
+	require.NoError(t, err)
 
 	// Start and shutdown
 	require.NoError(t, recv.Start(ctx))
@@ -208,47 +185,7 @@ func TestReceiver_Shutdown(t *testing.T) {
 
 	// Start after shutdown returns error
 	err = recv.Start(ctx)
-	require.Equal(t, errReceiverShutdown, err)
-}
-
-func TestReceiver_BothCallbackAndChannel(t *testing.T) {
-	ns := startEmbeddedNATS(t)
-	nc := connectToNATS(t, ns)
-	ctx := t.Context()
-
-	exp, err := NewLogExporter(nc, WithSubjectPrefix("both"))
-	require.NoError(t, err)
-
-	recv, err := NewReceiver(nc, WithReceiverSubjectPrefix("both"))
-	require.NoError(t, err)
-
-	// Set both callback and channel
-	var callbackReceived atomic.Bool
-	recv.OnLogs(func(ctx context.Context, data *logspb.LogsData) error {
-		callbackReceived.Store(true)
-		return nil
-	})
-	logsCh := recv.Logs()
-
-	require.NoError(t, recv.Start(ctx))
-
-	// Export
-	rec := createTestLogRecord(t)
-	require.NoError(t, exp.Export(ctx, []sdklog.Record{rec}))
-
-	// Both should receive the message
-	require.Eventually(t, func() bool {
-		return callbackReceived.Load()
-	}, 5*time.Second, 10*time.Millisecond)
-
-	select {
-	case <-logsCh:
-		// OK
-	case <-time.After(5 * time.Second):
-		t.Fatal("channel did not receive message")
-	}
-
-	require.NoError(t, recv.Shutdown(ctx))
+	require.Equal(t, ErrReceiverShutdown, err)
 }
 
 func TestReceiver_NoSubscriptionsWithoutHandlers(t *testing.T) {
@@ -262,9 +199,7 @@ func TestReceiver_NoSubscriptionsWithoutHandlers(t *testing.T) {
 	// Start without any handlers - should succeed but not subscribe to anything
 	require.NoError(t, recv.Start(ctx))
 
-	// Verify no subscriptions were created
-	require.Empty(t, recv.subs)
-
+	// Shutdown
 	require.NoError(t, recv.Shutdown(ctx))
 }
 
@@ -285,22 +220,27 @@ func TestReceiver_JetStream(t *testing.T) {
 	streamName := createTestStream(t, js, "jsrecv")
 
 	// Create exporter with JetStream
-	exp, err := NewLogExporter(nc, WithSubjectPrefix("jsrecv"), WithJetStream(js))
+	exp, err := NewLogExporter(nc, WithExporterSubjectPrefix("jsrecv"), WithExporterJetStream(js))
 	require.NoError(t, err)
+
+	// Track received data
+	received := make(chan *logspb.LogsData, 1)
 
 	// Create receiver with JetStream
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("jsrecv"),
 		WithReceiverJetStream(js, streamName),
+		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			data, err := msg.Item()
+			if err != nil {
+				return err
+			}
+
+			received <- data
+			return nil
+		}),
 	)
 	require.NoError(t, err)
-
-	// Track received data
-	received := make(chan *logspb.LogsData, 1)
-	recv.OnLogs(func(ctx context.Context, data *logspb.LogsData) error {
-		received <- data
-		return nil
-	})
 
 	require.NoError(t, recv.Start(ctx))
 	defer recv.Shutdown(ctx)
@@ -329,7 +269,7 @@ func TestReceiver_JetStream_DurableConsumer(t *testing.T) {
 	streamName := createTestStream(t, js, "jsdurable")
 
 	// Create exporter with JetStream
-	exp, err := NewLogExporter(nc, WithSubjectPrefix("jsdurable"), WithJetStream(js))
+	exp, err := NewLogExporter(nc, WithExporterSubjectPrefix("jsdurable"), WithExporterJetStream(js))
 	require.NoError(t, err)
 
 	// Create receiver with durable consumer
@@ -337,13 +277,18 @@ func TestReceiver_JetStream_DurableConsumer(t *testing.T) {
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("jsdurable"),
 		WithReceiverJetStream(js, streamName),
-		WithConsumerName("test-consumer"),
+		WithReceiverConsumerName("test-consumer"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			data, err := msg.Item()
+			if err != nil {
+				return err
+			}
+
+			received <- data
+			return nil
+		}),
 	)
 	require.NoError(t, err)
-	recv.OnLogs(func(ctx context.Context, data *logspb.LogsData) error {
-		received <- data
-		return nil
-	})
 
 	require.NoError(t, recv.Start(ctx))
 
@@ -384,7 +329,7 @@ func TestReceiver_JetStream_NakOnError(t *testing.T) {
 	streamName := createTestStream(t, js, "jsnak")
 
 	// Create exporter with JetStream
-	exp, err := NewLogExporter(nc, WithSubjectPrefix("jsnak"), WithJetStream(js))
+	exp, err := NewLogExporter(nc, WithExporterSubjectPrefix("jsnak"), WithExporterJetStream(js))
 	require.NoError(t, err)
 
 	// Track delivery attempts
@@ -394,18 +339,22 @@ func TestReceiver_JetStream_NakOnError(t *testing.T) {
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("jsnak"),
 		WithReceiverJetStream(js, streamName),
-		WithAckWait(500*time.Millisecond), // Short ack wait for faster test
+		WithReceiverAckWait(500*time.Millisecond), // Short ack wait for faster test
+		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			_, err := msg.Item()
+			if err != nil {
+				return err
+			}
+
+			count := attempts.Add(1)
+			// Fail first 2 attempts, succeed on 3rd
+			if count < 3 {
+				return errSimulated
+			}
+			return nil
+		}),
 	)
 	require.NoError(t, err)
-
-	recv.OnLogs(func(ctx context.Context, data *logspb.LogsData) error {
-		count := attempts.Add(1)
-		// Fail first 2 attempts, succeed on 3rd
-		if count < 3 {
-			return errSimulated
-		}
-		return nil
-	})
 
 	require.NoError(t, recv.Start(ctx))
 	defer recv.Shutdown(ctx)
@@ -433,7 +382,7 @@ func TestReceiver_JetStream_QueueGroup(t *testing.T) {
 	streamName := createTestStream(t, js1, "jsqg")
 
 	// Create exporter
-	exp, err := NewLogExporter(nc1, WithSubjectPrefix("jsqg"), WithJetStream(js1))
+	exp, err := NewLogExporter(nc1, WithExporterSubjectPrefix("jsqg"), WithExporterJetStream(js1))
 	require.NoError(t, err)
 
 	// Create two receivers in same queue group
@@ -442,24 +391,33 @@ func TestReceiver_JetStream_QueueGroup(t *testing.T) {
 	recv1, err := NewReceiver(nc2,
 		WithReceiverSubjectPrefix("jsqg"),
 		WithReceiverJetStream(js2, streamName),
-		WithQueueGroup("test-group"),
+		WithReceiverQueueGroup("test-group"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			_, err := msg.Item()
+			if err != nil {
+				return err
+			}
+			count1.Add(1)
+			return nil
+		}),
 	)
 	require.NoError(t, err)
-	recv1.OnLogs(func(ctx context.Context, data *logspb.LogsData) error {
-		count1.Add(1)
-		return nil
-	})
 
 	recv2, err := NewReceiver(nc3,
 		WithReceiverSubjectPrefix("jsqg"),
 		WithReceiverJetStream(js3, streamName),
-		WithQueueGroup("test-group"),
+		WithReceiverQueueGroup("test-group"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			_, err := msg.Item()
+			if err != nil {
+				return err
+			}
+
+			count2.Add(1)
+			return nil
+		}),
 	)
 	require.NoError(t, err)
-	recv2.OnLogs(func(ctx context.Context, data *logspb.LogsData) error {
-		count2.Add(1)
-		return nil
-	})
 
 	require.NoError(t, recv1.Start(ctx))
 	require.NoError(t, recv2.Start(ctx))
@@ -482,4 +440,285 @@ func TestReceiver_JetStream_QueueGroup(t *testing.T) {
 
 	require.NoError(t, recv1.Shutdown(ctx))
 	require.NoError(t, recv2.Shutdown(ctx))
+}
+
+func TestReceiver_MessageHandler_TypedAccess(t *testing.T) {
+	ns := startEmbeddedNATS(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	exp, err := NewLogExporter(nc, WithExporterSubjectPrefix("msg"))
+	require.NoError(t, err)
+
+	// Track received data using generic MessageHandler
+	var receivedData atomic.Pointer[logspb.LogsData]
+
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("msg"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			// Access typed data via Item()
+			data, err := msg.Item()
+			if err != nil {
+				return err
+			}
+			receivedData.Store(data)
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, recv.Start(ctx))
+
+	// Send test data
+	rec := createTestLogRecord(t)
+	require.NoError(t, exp.Export(ctx, []sdklog.Record{rec}))
+
+	// Verify typed data was received
+	require.Eventually(t, func() bool {
+		return receivedData.Load() != nil
+	}, 1*time.Second, 10*time.Millisecond)
+
+	data := receivedData.Load()
+	require.NotNil(t, data)
+	require.Len(t, data.ResourceLogs, 1)
+
+	require.NoError(t, recv.Shutdown(ctx))
+}
+
+func TestReceiver_MessageHandler_RawAccess(t *testing.T) {
+	ns := startEmbeddedNATS(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	exp, err := NewLogExporter(nc, WithExporterSubjectPrefix("raw"))
+	require.NoError(t, err)
+
+	// Track raw bytes and headers
+	var receivedBytes atomic.Pointer[[]byte]
+	var contentType atomic.Pointer[string]
+
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("raw"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			// Access raw bytes without unmarshaling
+			rawData := msg.Data()
+			receivedBytes.Store(&rawData)
+
+			// Access headers
+			ct := msg.Headers().Get(HeaderContentType)
+			contentType.Store(&ct)
+
+			// Don't call Item() - testing raw access only
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, recv.Start(ctx))
+
+	// Send test data
+	rec := createTestLogRecord(t)
+	require.NoError(t, exp.Export(ctx, []sdklog.Record{rec}))
+
+	// Verify raw bytes were received
+	require.Eventually(t, func() bool {
+		return receivedBytes.Load() != nil
+	}, 1*time.Second, 10*time.Millisecond)
+
+	rawBytes := receivedBytes.Load()
+	require.NotNil(t, rawBytes)
+	require.NotEmpty(t, *rawBytes)
+
+	ct := contentType.Load()
+	require.NotNil(t, ct)
+	require.Equal(t, ContentTypeProtobuf, *ct)
+
+	require.NoError(t, recv.Shutdown(ctx))
+}
+
+func TestReceiver_MessageHandler_BothTypedAndRaw(t *testing.T) {
+	ns := startEmbeddedNATS(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	exp, err := NewLogExporter(nc, WithExporterSubjectPrefix("both"))
+	require.NoError(t, err)
+
+	// Track both typed and raw access
+	var typedAccess atomic.Bool
+	var rawAccess atomic.Bool
+
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("both"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			// Can access both in same handler
+			rawData := msg.Data()
+			if len(rawData) > 0 {
+				rawAccess.Store(true)
+			}
+
+			typedData, err := msg.Item()
+			if err != nil {
+				return err
+			}
+			if len(typedData.ResourceLogs) > 0 {
+				typedAccess.Store(true)
+			}
+
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, recv.Start(ctx))
+
+	// Send test data
+	rec := createTestLogRecord(t)
+	require.NoError(t, exp.Export(ctx, []sdklog.Record{rec}))
+
+	// Verify both access patterns worked
+	require.Eventually(t, func() bool {
+		return typedAccess.Load() && rawAccess.Load()
+	}, 1*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, recv.Shutdown(ctx))
+}
+
+func TestReceiver_MessageHandler_ErrorHandling(t *testing.T) {
+	ns := startEmbeddedNATSWithJetStream(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	// Set up JetStream for error testing (need Nak support)
+	js := createJetStream(t, nc)
+	streamName := createTestStream(t, js, "error")
+
+	exp, err := NewLogExporter(nc, WithExporterSubjectPrefix("error"))
+	require.NoError(t, err)
+
+	// Handler that returns error - should trigger Nak
+	var callCount atomic.Int32
+	testErr := errors.New("test error")
+
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("error"),
+		WithReceiverJetStream(js, streamName),
+		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			callCount.Add(1)
+
+			// Return error on first call, success on retry
+			if callCount.Load() == 1 {
+				return testErr
+			}
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, recv.Start(ctx))
+
+	// Send test data
+	rec := createTestLogRecord(t)
+	require.NoError(t, exp.Export(ctx, []sdklog.Record{rec}))
+
+	// Handler should be called multiple times due to Nak/retry
+	require.Eventually(t, func() bool {
+		return callCount.Load() >= 2
+	}, 5*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, recv.Shutdown(ctx))
+}
+
+func TestReceiver_MessageHandler_JetStream(t *testing.T) {
+	ns := startEmbeddedNATSWithJetStream(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	js := createJetStream(t, nc)
+	streamName := createTestStream(t, js, "msgjs")
+
+	exp, err := NewLogExporter(nc, WithExporterSubjectPrefix("msgjs"))
+	require.NoError(t, err)
+
+	var received atomic.Pointer[logspb.LogsData]
+	var ackCalled atomic.Bool
+
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("msgjs"),
+		WithReceiverJetStream(js, streamName),
+		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			data, err := msg.Item()
+			if err != nil {
+				return err
+			}
+			received.Store(data)
+
+			// Ack should work with JetStream
+			err = msg.Ack()
+			if err == nil {
+				ackCalled.Store(true)
+			}
+
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, recv.Start(ctx))
+
+	// Send test data
+	rec := createTestLogRecord(t)
+	require.NoError(t, exp.Export(ctx, []sdklog.Record{rec}))
+
+	// Verify message received and acknowledged
+	require.Eventually(t, func() bool {
+		return received.Load() != nil
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Note: Ack is called internally by handleLogs based on handler error,
+	// so explicit Ack() call from handler is a no-op (already acked)
+	// We mainly verify the Ack() method doesn't panic
+
+	require.NoError(t, recv.Shutdown(ctx))
+}
+
+func TestReceiver_MessageHandler_CustomUnmarshal(t *testing.T) {
+	ns := startEmbeddedNATS(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	exp, err := NewLogExporter(nc, WithExporterSubjectPrefix("custom"))
+	require.NoError(t, err)
+
+	// Demonstrate custom unmarshaling to different type
+	var customUnmarshalSuccess atomic.Bool
+
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("custom"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			// Can unmarshal raw bytes to custom type
+			var customData logspb.LogsData
+			contentType := msg.Headers().Get(HeaderContentType)
+			err := Unmarshal(msg.Data(), contentType, &customData)
+			if err == nil && len(customData.ResourceLogs) > 0 {
+				customUnmarshalSuccess.Store(true)
+			}
+
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, recv.Start(ctx))
+
+	// Send test data
+	rec := createTestLogRecord(t)
+	require.NoError(t, exp.Export(ctx, []sdklog.Record{rec}))
+
+	// Verify custom unmarshaling worked
+	require.Eventually(t, func() bool {
+		return customUnmarshalSuccess.Load()
+	}, 1*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, recv.Shutdown(ctx))
 }

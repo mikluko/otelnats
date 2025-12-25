@@ -3,6 +3,7 @@ package otelnats
 import "errors"
 
 var (
-	errNilConnection    = errors.New("otelnats: nil NATS connection")
-	errReceiverShutdown = errors.New("otelnats: receiver already shut down")
+	ErrNilConnection    = errors.New("otelnats: nil NATS connection")
+	ErrReceiverShutdown = errors.New("otelnats: receiver already shut down")
+	ErrUnmarshall       = errors.New("otelnats: failed to unmarshal data")
 )

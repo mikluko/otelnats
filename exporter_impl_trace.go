@@ -21,10 +21,10 @@ type TraceExporter struct {
 // NewTraceExporter creates a new trace exporter that publishes to NATS.
 //
 // The exporter publishes protobuf-serialized OTLP trace data to the configured
-// subject (default: "otel.traces"). Use [WithSubjectPrefix] to customize.
-func NewTraceExporter(nc *nats.Conn, opts ...Option) (*TraceExporter, error) {
+// subject (default: "otel.traces"). Use [WithExporterSubjectPrefix] to customize.
+func NewTraceExporter(nc *nats.Conn, opts ...ExporterOption) (*TraceExporter, error) {
 	if nc == nil {
-		return nil, errNilConnection
+		return nil, ErrNilConnection
 	}
 
 	cfg := defaultConfig()

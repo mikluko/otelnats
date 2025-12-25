@@ -7,13 +7,13 @@
 // # Exporters
 //
 // Exporters implement the standard OTel SDK interfaces:
-//   - [LogExporter] implements [go.opentelemetry.io/otel/sdk/log.Exporter]
+//   - [logExporterImpl] implements [go.opentelemetry.io/otel/sdk/log.Exporter]
 //   - TraceExporter implements [go.opentelemetry.io/otel/sdk/trace.SpanExporter]
-//   - MetricExporter implements [go.opentelemetry.io/otel/sdk/metric.Exporter]
+//   - metricExporterImpl implements [go.opentelemetry.io/otel/sdk/metric.Exporter]
 //
 // # Subject Naming
 //
-// Default subjects (configurable via [WithSubjectPrefix]):
+// Default subjects (configurable via [WithExporterSubjectPrefix]):
 //   - otel.traces
 //   - otel.metrics
 //   - otel.logs

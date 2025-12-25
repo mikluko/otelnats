@@ -20,7 +20,7 @@ func TestNewLogExporter(t *testing.T) {
 		exp, err := NewLogExporter(nil)
 		require.Error(t, err)
 		require.Nil(t, exp)
-		require.Equal(t, errNilConnection, err)
+		require.Equal(t, ErrNilConnection, err)
 	})
 
 	t.Run("valid connection succeeds", func(t *testing.T) {
@@ -50,7 +50,7 @@ func TestLogExporter_Export(t *testing.T) {
 	})
 
 	t.Run("exports records with correct subject and headers", func(t *testing.T) {
-		exp, err := NewLogExporter(nc, WithSubjectPrefix("test"))
+		exp, err := NewLogExporter(nc, WithExporterSubjectPrefix("test"))
 		require.NoError(t, err)
 
 		// Subscribe to receive the message
@@ -90,8 +90,8 @@ func TestLogExporter_Export(t *testing.T) {
 
 	t.Run("custom headers are included", func(t *testing.T) {
 		exp, err := NewLogExporter(nc,
-			WithSubjectPrefix("headers"),
-			WithHeaders(func(ctx context.Context) nats.Header {
+			WithExporterSubjectPrefix("headers"),
+			WithExporterHeaders(func(ctx context.Context) nats.Header {
 				return nats.Header{"X-Custom": []string{"value"}}
 			}),
 		)
@@ -159,7 +159,7 @@ func TestLogExporter_RecordGrouping(t *testing.T) {
 	nc := connectToNATS(t, ns)
 	ctx := t.Context()
 
-	exp, err := NewLogExporter(nc, WithSubjectPrefix("group"))
+	exp, err := NewLogExporter(nc, WithExporterSubjectPrefix("group"))
 	require.NoError(t, err)
 
 	sub, err := nc.SubscribeSync("group.logs")
@@ -209,5 +209,5 @@ func createTestLogRecord(t *testing.T) sdklog.Record {
 	return rec
 }
 
-// Compile-time check that LogExporter implements sdklog.Exporter
-var _ sdklog.Exporter = (*LogExporter)(nil)
+// Compile-time check that logExporterImpl implements sdklog.Exporter
+var _ sdklog.Exporter = (*logExporterImpl)(nil)

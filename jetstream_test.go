@@ -50,23 +50,27 @@ func TestJetStreamIntegration(t *testing.T) {
 
 	// Create exporter and receiver
 	exp, err := NewLogExporter(nc,
-		WithSubjectPrefix("integ"),
-		WithJetStream(js),
-	)
-	require.NoError(t, err)
-
-	recv, err := NewReceiver(nc,
-		WithReceiverSubjectPrefix("integ"),
-		WithReceiverJetStream(js, "INTEGRATION_TEST"),
-		WithConsumerName("test-processor"),
+		WithExporterSubjectPrefix("integ"),
+		WithExporterJetStream(js),
 	)
 	require.NoError(t, err)
 
 	received := make(chan struct{}, 1)
-	recv.OnLogs(func(_ context.Context, _ *logspb.LogsData) error {
-		received <- struct{}{}
-		return nil
-	})
+
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("integ"),
+		WithReceiverJetStream(js, "INTEGRATION_TEST"),
+		WithReceiverConsumerName("test-processor"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			_, err := msg.Item()
+			if err != nil {
+				return err
+			}
+			received <- struct{}{}
+			return nil
+		}),
+	)
+	require.NoError(t, err)
 
 	require.NoError(t, recv.Start(ctx))
 	defer recv.Shutdown(ctx)
@@ -116,24 +120,28 @@ func TestJetStreamWithPreCreatedConsumer(t *testing.T) {
 
 	// Create exporter
 	exp, err := NewLogExporter(nc,
-		WithSubjectPrefix("pre"),
-		WithJetStream(js),
+		WithExporterSubjectPrefix("pre"),
+		WithExporterJetStream(js),
 	)
 	require.NoError(t, err)
 
 	// Create receiver that binds to pre-created consumer
+	received := make(chan *logspb.LogsData, 1)
+
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("pre"),
 		WithReceiverJetStream(js, "PRECREATED"),
-		WithConsumerName("pre-created-consumer"),
+		WithReceiverConsumerName("pre-created-consumer"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			data, err := msg.Item()
+			if err != nil {
+				return err
+			}
+			received <- data
+			return nil
+		}),
 	)
 	require.NoError(t, err)
-
-	received := make(chan *logspb.LogsData, 1)
-	recv.OnLogs(func(_ context.Context, data *logspb.LogsData) error {
-		received <- data
-		return nil
-	})
 
 	require.NoError(t, recv.Start(ctx))
 	defer recv.Shutdown(ctx)
@@ -182,24 +190,28 @@ func TestReceiverWithConsumerObject(t *testing.T) {
 
 	// Create exporter
 	exp, err := NewLogExporter(nc,
-		WithSubjectPrefix("wc"),
-		WithJetStream(js),
+		WithExporterSubjectPrefix("wc"),
+		WithExporterJetStream(js),
 	)
 	require.NoError(t, err)
 
 	// Create receiver using WithConsumer (passing consumer directly)
+	received := make(chan *logspb.LogsData, 1)
+
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("wc"),
 		WithReceiverJetStream(js, "WITHCONSUMER"),
-		WithConsumer(consumer),
+		WithReceiverConsumer(consumer),
+		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			data, err := msg.Item()
+			if err != nil {
+				return err
+			}
+			received <- data
+			return nil
+		}),
 	)
 	require.NoError(t, err)
-
-	received := make(chan *logspb.LogsData, 1)
-	recv.OnLogs(func(_ context.Context, data *logspb.LogsData) error {
-		received <- data
-		return nil
-	})
 
 	require.NoError(t, recv.Start(ctx))
 	defer recv.Shutdown(ctx)
@@ -237,33 +249,37 @@ func TestMultiTenantWithSuffix(t *testing.T) {
 
 	// Create exporter for tenant-a
 	expA, err := NewLogExporter(nc,
-		WithSubjectPrefix("mt"),
-		WithSubjectSuffix("tenant-a"),
-		WithJetStream(js),
+		WithExporterSubjectPrefix("mt"),
+		WithExporterSubjectSuffix("tenant-a"),
+		WithExporterJetStream(js),
 	)
 	require.NoError(t, err)
 
 	// Create exporter for tenant-b
 	expB, err := NewLogExporter(nc,
-		WithSubjectPrefix("mt"),
-		WithSubjectSuffix("tenant-b"),
-		WithJetStream(js),
+		WithExporterSubjectPrefix("mt"),
+		WithExporterSubjectSuffix("tenant-b"),
+		WithExporterJetStream(js),
 	)
 	require.NoError(t, err)
 
 	// Create receiver that subscribes to all tenants
+	received := make(chan *logspb.LogsData, 10)
+
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("mt"),
 		WithReceiverSubjectSuffix(">"),
 		WithReceiverJetStream(js, "MULTI_TENANT"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			data, err := msg.Item()
+			if err != nil {
+				return err
+			}
+			received <- data
+			return nil
+		}),
 	)
 	require.NoError(t, err)
-
-	received := make(chan *logspb.LogsData, 10)
-	recv.OnLogs(func(_ context.Context, data *logspb.LogsData) error {
-		received <- data
-		return nil
-	})
 
 	require.NoError(t, recv.Start(ctx))
 	defer recv.Shutdown(ctx)

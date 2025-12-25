@@ -8,23 +8,13 @@ import (
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 )
 
-// LogExporter exports log records to NATS.
-// It implements [go.opentelemetry.io/otel/sdk/log.Exporter].
-type LogExporter struct {
-	conn   *nats.Conn
-	config *config
-
-	mu       sync.Mutex
-	shutdown bool
-}
-
 // NewLogExporter creates a new log exporter that publishes to NATS.
 //
 // The exporter publishes protobuf-serialized OTLP log data to the configured
-// subject (default: "otel.logs"). Use [WithSubjectPrefix] to customize.
-func NewLogExporter(nc *nats.Conn, opts ...Option) (*LogExporter, error) {
+// subject (default: "otel.logs"). Use [WithExporterSubjectPrefix] to customize.
+func NewLogExporter(nc *nats.Conn, opts ...ExporterOption) (sdklog.Exporter, error) {
 	if nc == nil {
-		return nil, errNilConnection
+		return nil, ErrNilConnection
 	}
 
 	cfg := defaultConfig()
@@ -32,17 +22,27 @@ func NewLogExporter(nc *nats.Conn, opts ...Option) (*LogExporter, error) {
 		opt(cfg)
 	}
 
-	return &LogExporter{
+	return &logExporterImpl{
 		conn:   nc,
 		config: cfg,
 	}, nil
+}
+
+// logExporterImpl exports log records to NATS.
+// It implements [go.opentelemetry.io/otel/sdk/log.Exporter].
+type logExporterImpl struct {
+	conn   *nats.Conn
+	config *config
+
+	mu       sync.Mutex
+	shutdown bool
 }
 
 // Export exports log records to NATS.
 //
 // Records are converted to OTLP protobuf format and published to the logs subject.
 // The method respects context cancellation and the configured timeout.
-func (e *LogExporter) Export(ctx context.Context, records []sdklog.Record) error {
+func (e *logExporterImpl) Export(ctx context.Context, records []sdklog.Record) error {
 	e.mu.Lock()
 	if e.shutdown {
 		e.mu.Unlock()
@@ -77,7 +77,7 @@ func (e *LogExporter) Export(ctx context.Context, records []sdklog.Record) error
 	return e.publishCore(ctx, msg)
 }
 
-func (e *LogExporter) publishCore(ctx context.Context, msg *nats.Msg) error {
+func (e *logExporterImpl) publishCore(ctx context.Context, msg *nats.Msg) error {
 	if err := e.conn.PublishMsg(msg); err != nil {
 		return err
 	}
@@ -85,7 +85,7 @@ func (e *LogExporter) publishCore(ctx context.Context, msg *nats.Msg) error {
 	return e.conn.FlushTimeout(e.config.timeout)
 }
 
-func (e *LogExporter) publishJetStream(ctx context.Context, msg *nats.Msg) error {
+func (e *logExporterImpl) publishJetStream(ctx context.Context, msg *nats.Msg) error {
 	_, err := e.config.jetstream.PublishMsg(ctx, msg)
 	return err
 }
@@ -94,7 +94,7 @@ func (e *LogExporter) publishJetStream(ctx context.Context, msg *nats.Msg) error
 //
 // It drains the NATS connection to ensure pending messages are sent.
 // After Shutdown is called, Export will return immediately without error.
-func (e *LogExporter) Shutdown(_ context.Context) error {
+func (e *logExporterImpl) Shutdown(_ context.Context) error {
 	e.mu.Lock()
 	e.shutdown = true
 	e.mu.Unlock()
@@ -107,7 +107,7 @@ func (e *LogExporter) Shutdown(_ context.Context) error {
 // ForceFlush flushes any buffered log data.
 //
 // For NATS, this ensures all published messages have been sent to the server.
-func (e *LogExporter) ForceFlush(_ context.Context) error {
+func (e *logExporterImpl) ForceFlush(_ context.Context) error {
 	e.mu.Lock()
 	if e.shutdown {
 		e.mu.Unlock()

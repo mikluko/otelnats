@@ -3,6 +3,7 @@ package otelnats
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -17,26 +18,23 @@ import (
 )
 
 type Message[T any] interface {
-	Item() T
+	// Item must return ErrUnmarshall if the message data is invalid
+	Item() (*T, error)
 	Data() []byte
 	Headers() nats.Header
 	Ack() error
 	Nak() error
 }
 
-type MessageHandler[T any] func(ctx context.Context, signal string, msg Message[T]) error
+type Receiver interface {
+	Start(ctx context.Context) error
+	Shutdown(ctx context.Context) error
+}
 
-// LogsHandler is called when log data is received.
-type LogsHandler func(context.Context, *logspb.LogsData) error
+type MessageHandler[T any] func(ctx context.Context, msg Message[T]) error
 
-// TracesHandler is called when trace data is received.
-type TracesHandler func(context.Context, *tracespb.TracesData) error
-
-// MetricsHandler is called when metric data is received.
-type MetricsHandler func(context.Context, *metricspb.MetricsData) error
-
-// Receiver consumes OTLP telemetry from NATS subjects.
-type Receiver struct {
+// receiverImpl consumes OTLP telemetry from NATS subjects.
+type receiverImpl struct {
 	conn   *nats.Conn
 	config *receiverConfig
 
@@ -44,20 +42,10 @@ type Receiver struct {
 	started  bool
 	shutdown bool
 
-	// Handlers (generic MessageHandlers take precedence over typed handlers)
+	// Message handlers
 	logsMessageHandler    MessageHandler[logspb.LogsData]
 	tracesMessageHandler  MessageHandler[tracespb.TracesData]
 	metricsMessageHandler MessageHandler[metricspb.MetricsData]
-
-	// Legacy typed handlers (deprecated in favor of MessageHandler)
-	logsHandler    LogsHandler
-	tracesHandler  TracesHandler
-	metricsHandler MetricsHandler
-
-	// Channels (lazily created)
-	logsCh    chan *logspb.LogsData
-	tracesCh  chan *tracespb.TracesData
-	metricsCh chan *metricspb.MetricsData
 
 	// Core NATS subscriptions
 	subs []*nats.Subscription
@@ -73,30 +61,38 @@ type receiverConfig struct {
 	subjectPrefix string
 	subjectSuffix string
 	queueGroup    string
-	chanBufSize   int
 
 	// JetStream options
-	jetstream      jetstream.JetStream
-	stream         string
-	consumerName   string
-	consumer       jetstream.Consumer // pre-created consumer from WithConsumer
-	ackWait        time.Duration
-	fetchBatchSize int
-	fetchTimeout   time.Duration
+	jetstream    jetstream.JetStream
+	stream       string
+	consumerName string
+	consumer     jetstream.Consumer // pre-created consumer from WithReceiverConsumer
+	ackWait      time.Duration
+
+	// handlers
+	logsHandler    MessageHandler[logspb.LogsData]
+	tracesHandler  MessageHandler[tracespb.TracesData]
+	metricsHandler MessageHandler[metricspb.MetricsData]
 }
 
 func defaultReceiverConfig() *receiverConfig {
 	return &receiverConfig{
-		subjectPrefix:  defaultSubjectPrefix,
-		queueGroup:     "",
-		chanBufSize:    100,
-		ackWait:        30 * time.Second,
-		fetchBatchSize: 10,
-		fetchTimeout:   5 * time.Second,
+		subjectPrefix: defaultSubjectPrefix,
+		queueGroup:    "",
+		ackWait:       30 * time.Second,
+		logsHandler: func(ctx context.Context, msg Message[logspb.LogsData]) error {
+			return nil // No-op handler by default
+		},
+		tracesHandler: func(ctx context.Context, msg Message[tracespb.TracesData]) error {
+			return nil
+		},
+		metricsHandler: func(ctx context.Context, msg Message[metricspb.MetricsData]) error {
+			return nil
+		},
 	}
 }
 
-// ReceiverOption configures a Receiver.
+// ReceiverOption configures a receiverImpl.
 type ReceiverOption func(*receiverConfig)
 
 // WithReceiverSubjectPrefix sets the subject prefix for subscriptions.
@@ -119,20 +115,12 @@ func WithReceiverSubjectSuffix(suffix string) ReceiverOption {
 	}
 }
 
-// WithQueueGroup sets the queue group for load-balanced consumption.
+// WithReceiverQueueGroup sets the queue group for load-balanced consumption.
 // When multiple receivers use the same queue group, each message is
 // delivered to only one receiver in the group.
-func WithQueueGroup(group string) ReceiverOption {
+func WithReceiverQueueGroup(group string) ReceiverOption {
 	return func(c *receiverConfig) {
 		c.queueGroup = group
-	}
-}
-
-// WithChannelBufferSize sets the buffer size for channel-based APIs.
-// The default is 100.
-func WithChannelBufferSize(size int) ReceiverOption {
-	return func(c *receiverConfig) {
-		c.chanBufSize = size
 	}
 }
 
@@ -147,59 +135,59 @@ func WithReceiverJetStream(js jetstream.JetStream, stream string) ReceiverOption
 	}
 }
 
-// WithConsumerName sets the durable consumer name for JetStream subscriptions.
+// WithReceiverConsumerName sets the durable consumer name for JetStream subscriptions.
 // When set, the consumer state is persisted, allowing receivers to resume
 // from where they left off after restart.
 // Only applies when JetStream is enabled via [WithReceiverJetStream].
-func WithConsumerName(name string) ReceiverOption {
+func WithReceiverConsumerName(name string) ReceiverOption {
 	return func(c *receiverConfig) {
 		c.consumerName = name
 	}
 }
 
-// WithConsumer binds the receiver to an existing JetStream consumer.
+// WithReceiverConsumer binds the receiver to an existing JetStream consumer.
 // The consumer must already exist (created via the native jetstream API).
 // This option stores the consumer directly, avoiding lookups during subscription.
 // Only applies when JetStream is enabled via [WithReceiverJetStream].
-func WithConsumer(consumer jetstream.Consumer) ReceiverOption {
+func WithReceiverConsumer(consumer jetstream.Consumer) ReceiverOption {
 	return func(c *receiverConfig) {
 		c.consumer = consumer
 		c.consumerName = consumer.CachedInfo().Name
 	}
 }
 
-// WithAckWait sets the acknowledgment timeout for JetStream messages.
+// WithReceiverAckWait sets the acknowledgment timeout for JetStream messages.
 // If a message is not acknowledged within this duration, it will be redelivered.
 // The default is 30 seconds.
 // Only applies when JetStream is enabled via [WithReceiverJetStream].
-func WithAckWait(d time.Duration) ReceiverOption {
+func WithReceiverAckWait(d time.Duration) ReceiverOption {
 	return func(c *receiverConfig) {
 		c.ackWait = d
 	}
 }
 
-// WithFetchBatchSize sets the number of messages to fetch in each batch.
-// The default is 10.
-// Only applies when JetStream is enabled via [WithReceiverJetStream].
-func WithFetchBatchSize(n int) ReceiverOption {
-	return func(c *receiverConfig) {
-		c.fetchBatchSize = n
+func WithReceiverLogsHandler(fn MessageHandler[logspb.LogsData]) ReceiverOption {
+	return func(r *receiverConfig) {
+		r.logsHandler = fn
 	}
 }
 
-// WithFetchTimeout sets the maximum time to wait for messages when fetching.
-// The default is 5 seconds.
-// Only applies when JetStream is enabled via [WithReceiverJetStream].
-func WithFetchTimeout(d time.Duration) ReceiverOption {
-	return func(c *receiverConfig) {
-		c.fetchTimeout = d
+func WithReceiverTracesHandler(fn MessageHandler[tracespb.TracesData]) ReceiverOption {
+	return func(r *receiverConfig) {
+		r.tracesHandler = fn
+	}
+}
+
+func WithReceiverMetricsHandler(fn MessageHandler[metricspb.MetricsData]) ReceiverOption {
+	return func(r *receiverConfig) {
+		r.metricsHandler = fn
 	}
 }
 
 // NewReceiver creates a new receiver that consumes from NATS.
-func NewReceiver(nc *nats.Conn, opts ...ReceiverOption) (*Receiver, error) {
+func NewReceiver(nc *nats.Conn, opts ...ReceiverOption) (Receiver, error) {
 	if nc == nil {
-		return nil, errNilConnection
+		return nil, ErrNilConnection
 	}
 
 	cfg := defaultReceiverConfig()
@@ -207,137 +195,44 @@ func NewReceiver(nc *nats.Conn, opts ...ReceiverOption) (*Receiver, error) {
 		opt(cfg)
 	}
 
-	return &Receiver{
-		conn:   nc,
-		config: cfg,
+	return &receiverImpl{
+		conn:                  nc,
+		config:                cfg,
+		logsMessageHandler:    cfg.logsHandler,
+		tracesMessageHandler:  cfg.tracesHandler,
+		metricsMessageHandler: cfg.metricsHandler,
 	}, nil
 }
 
-// OnLogsMessage registers a generic handler for log messages.
-// The handler receives both typed and raw access to message data.
-// Takes precedence over OnLogs if both are set.
-// Must be called before Start.
-func (r *Receiver) OnLogsMessage(fn MessageHandler[logspb.LogsData]) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.logsMessageHandler = fn
-}
-
-// OnTracesMessage registers a generic handler for trace messages.
-// The handler receives both typed and raw access to message data.
-// Takes precedence over OnTraces if both are set.
-// Must be called before Start.
-func (r *Receiver) OnTracesMessage(fn MessageHandler[tracespb.TracesData]) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.tracesMessageHandler = fn
-}
-
-// OnMetricsMessage registers a generic handler for metric messages.
-// The handler receives both typed and raw access to message data.
-// Takes precedence over OnMetrics if both are set.
-// Must be called before Start.
-func (r *Receiver) OnMetricsMessage(fn MessageHandler[metricspb.MetricsData]) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.metricsMessageHandler = fn
-}
-
-// OnLogs registers a handler for log data.
-// The handler is called for each received log message.
-// Must be called before Start.
-// Deprecated: Use OnLogsMessage for more flexibility.
-func (r *Receiver) OnLogs(fn LogsHandler) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.logsHandler = fn
-}
-
-// OnTraces registers a handler for trace data.
-// The handler is called for each received trace message.
-// Must be called before Start.
-// Deprecated: Use OnTracesMessage for more flexibility.
-func (r *Receiver) OnTraces(fn TracesHandler) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.tracesHandler = fn
-}
-
-// OnMetrics registers a handler for metric data.
-// The handler is called for each received metric message.
-// Must be called before Start.
-// Deprecated: Use OnMetricsMessage for more flexibility.
-func (r *Receiver) OnMetrics(fn MetricsHandler) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.metricsHandler = fn
-}
-
-// Logs returns a channel that receives log data.
-// The channel is created on first call and closed on Shutdown.
-// Must be called before Start.
-func (r *Receiver) Logs() <-chan *logspb.LogsData {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.logsCh == nil {
-		r.logsCh = make(chan *logspb.LogsData, r.config.chanBufSize)
-	}
-	return r.logsCh
-}
-
-// Traces returns a channel that receives trace data.
-// The channel is created on first call and closed on Shutdown.
-// Must be called before Start.
-func (r *Receiver) Traces() <-chan *tracespb.TracesData {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.tracesCh == nil {
-		r.tracesCh = make(chan *tracespb.TracesData, r.config.chanBufSize)
-	}
-	return r.tracesCh
-}
-
-// Metrics returns a channel that receives metric data.
-// The channel is created on first call and closed on Shutdown.
-// Must be called before Start.
-func (r *Receiver) Metrics() <-chan *metricspb.MetricsData {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.metricsCh == nil {
-		r.metricsCh = make(chan *metricspb.MetricsData, r.config.chanBufSize)
-	}
-	return r.metricsCh
-}
-
 // Start begins receiving messages from NATS.
-// It subscribes to subjects based on registered handlers and channels.
-func (r *Receiver) Start(ctx context.Context) error {
+// It subscribes to subjects based on registered handlers.
+func (r *receiverImpl) Start(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if r.shutdown {
-		return errReceiverShutdown
+		return ErrReceiverShutdown
 	}
 	if r.started {
 		return nil
 	}
 
-	// Subscribe to logs if any handler or channel is set
-	if r.logsMessageHandler != nil || r.logsHandler != nil || r.logsCh != nil {
+	// Subscribe to logs if handler is set
+	if r.logsMessageHandler != nil {
 		if err := r.subscribe(ctx, SignalLogs, r.handleLogs); err != nil {
 			return err
 		}
 	}
 
-	// Subscribe to traces if any handler or channel is set
-	if r.tracesMessageHandler != nil || r.tracesHandler != nil || r.tracesCh != nil {
+	// Subscribe to traces if handler is set
+	if r.tracesMessageHandler != nil {
 		if err := r.subscribe(ctx, SignalTraces, r.handleTraces); err != nil {
 			return err
 		}
 	}
 
-	// Subscribe to metrics if any handler or channel is set
-	if r.metricsMessageHandler != nil || r.metricsHandler != nil || r.metricsCh != nil {
+	// Subscribe to metrics if handler is set
+	if r.metricsMessageHandler != nil {
 		if err := r.subscribe(ctx, SignalMetrics, r.handleMetrics); err != nil {
 			return err
 		}
@@ -355,18 +250,10 @@ type message interface {
 	Nak() error
 }
 
-// unmarshal decodes message data based on Content-Type header.
-// Supports both protobuf (default) and JSON encoding.
-// This is a thin wrapper around the exported Unmarshal function.
-func unmarshal(msg message, v proto.Message) error {
-	contentType := msg.Headers().Get(HeaderContentType)
-	return Unmarshal(msg.Data(), contentType, v)
-}
-
 // msgHandler is a generic handler for messages
 type msgHandler func(message)
 
-func (r *Receiver) subscribe(ctx context.Context, signal string, handler msgHandler) error {
+func (r *receiverImpl) subscribe(ctx context.Context, signal string, handler msgHandler) error {
 	subject := r.config.subjectPrefix + "." + signal
 	if r.config.subjectSuffix != "" {
 		subject += "." + r.config.subjectSuffix
@@ -418,55 +305,52 @@ func (m *coreNatsMsg) Nak() error {
 	return nil // Core NATS doesn't support nak
 }
 
-// genericMessage wraps a message and provides generic typed access with lazy unmarshaling
-type genericMessage[T any] struct {
+// messageImpl wraps a message and provides generic typed access with lazy unmarshaling
+type messageImpl[T any] struct {
 	msg     message
-	item    *T
+	item    T
 	itemErr error
 	once    sync.Once
 }
 
-func newGenericMessage[T any](msg message) *genericMessage[T] {
-	return &genericMessage[T]{msg: msg}
+func MessageFrom[T any](msg message) Message[T] {
+	return &messageImpl[T]{msg: msg}
 }
 
-func (m *genericMessage[T]) Item() T {
+func (m *messageImpl[T]) Item() (*T, error) {
 	m.once.Do(func() {
-		var v T
 		contentType := m.msg.Headers().Get(HeaderContentType)
 		// T must be a proto.Message, so we need to convert it
 		// This works because logspb.LogsData, tracespb.TracesData, metricspb.MetricsData all implement proto.Message
-		if protoMsg, ok := any(&v).(proto.Message); ok {
+		if protoMsg, ok := any(&m.item).(proto.Message); ok {
 			m.itemErr = Unmarshal(m.msg.Data(), contentType, protoMsg)
-			if m.itemErr == nil {
-				m.item = &v
+			if m.itemErr != nil {
+				m.itemErr = fmt.Errorf("%w: %v", ErrUnmarshall, m.itemErr)
 			}
+		} else {
+			panic("invalid type T for MessageFrom, this is always a programming error")
 		}
 	})
-	if m.item != nil {
-		return *m.item
-	}
-	var zero T
-	return zero
+	return &m.item, m.itemErr
 }
 
-func (m *genericMessage[T]) Data() []byte {
+func (m *messageImpl[T]) Data() []byte {
 	return m.msg.Data()
 }
 
-func (m *genericMessage[T]) Headers() nats.Header {
+func (m *messageImpl[T]) Headers() nats.Header {
 	return m.msg.Headers()
 }
 
-func (m *genericMessage[T]) Ack() error {
+func (m *messageImpl[T]) Ack() error {
 	return m.msg.Ack()
 }
 
-func (m *genericMessage[T]) Nak() error {
+func (m *messageImpl[T]) Nak() error {
 	return m.msg.Nak()
 }
 
-func (r *Receiver) subscribeJetStream(ctx context.Context, subject string, handler msgHandler) error {
+func (r *receiverImpl) subscribeJetStream(ctx context.Context, subject string, handler msgHandler) error {
 	consumerName := r.config.consumerName
 	if consumerName == "" {
 		// Generate ephemeral consumer name based on subject
@@ -525,122 +409,38 @@ func (r *Receiver) subscribeJetStream(ctx context.Context, subject string, handl
 	return nil
 }
 
-func (r *Receiver) handleLogs(msg message) {
+func (r *receiverImpl) handleLogs(msg message) {
 	r.wg.Add(1)
 	defer r.wg.Done()
 
 	ctx := context.Background()
-	var handlerErr error
-
-	// Priority 1: Generic message handler (provides both typed and raw access)
-	if r.logsMessageHandler != nil {
-		genericMsg := newGenericMessage[logspb.LogsData](msg)
-		handlerErr = r.logsMessageHandler(ctx, SignalLogs, genericMsg)
-		r.ackOrNak(msg, handlerErr)
-		return
-	}
-
-	// Priority 2 & 3: Legacy typed handler and/or channel
-	// These require unmarshaling upfront
-	var data logspb.LogsData
-	if err := unmarshal(msg, &data); err != nil {
-		// Malformed message - ack to prevent redelivery of bad data
-		_ = msg.Ack()
-		return
-	}
-
-	// Call legacy handler if set
-	if r.logsHandler != nil {
-		handlerErr = r.logsHandler(ctx, &data)
-	}
-
-	// Send to channel if set (non-blocking)
-	if r.logsCh != nil {
-		select {
-		case r.logsCh <- &data:
-		default:
-			// Channel full, drop message
-		}
-	}
-
-	// Ack/Nak for JetStream
+	msgT := MessageFrom[logspb.LogsData](msg)
+	handlerErr := r.logsMessageHandler(ctx, msgT)
 	r.ackOrNak(msg, handlerErr)
 }
 
-func (r *Receiver) handleTraces(msg message) {
+func (r *receiverImpl) handleTraces(msg message) {
 	r.wg.Add(1)
 	defer r.wg.Done()
 
 	ctx := context.Background()
-	var handlerErr error
-
-	// Priority 1: Generic message handler (provides both typed and raw access)
-	if r.tracesMessageHandler != nil {
-		genericMsg := newGenericMessage[tracespb.TracesData](msg)
-		handlerErr = r.tracesMessageHandler(ctx, SignalTraces, genericMsg)
-		r.ackOrNak(msg, handlerErr)
-		return
-	}
-
-	// Priority 2 & 3: Legacy typed handler and/or channel
-	var data tracespb.TracesData
-	if err := unmarshal(msg, &data); err != nil {
-		_ = msg.Ack()
-		return
-	}
-
-	if r.tracesHandler != nil {
-		handlerErr = r.tracesHandler(ctx, &data)
-	}
-
-	if r.tracesCh != nil {
-		select {
-		case r.tracesCh <- &data:
-		default:
-		}
-	}
-
+	msgT := MessageFrom[tracespb.TracesData](msg)
+	handlerErr := r.tracesMessageHandler(ctx, msgT)
 	r.ackOrNak(msg, handlerErr)
 }
 
-func (r *Receiver) handleMetrics(msg message) {
+func (r *receiverImpl) handleMetrics(msg message) {
 	r.wg.Add(1)
 	defer r.wg.Done()
 
 	ctx := context.Background()
-	var handlerErr error
-
-	// Priority 1: Generic message handler (provides both typed and raw access)
-	if r.metricsMessageHandler != nil {
-		genericMsg := newGenericMessage[metricspb.MetricsData](msg)
-		handlerErr = r.metricsMessageHandler(ctx, SignalMetrics, genericMsg)
-		r.ackOrNak(msg, handlerErr)
-		return
-	}
-
-	// Priority 2 & 3: Legacy typed handler and/or channel
-	var data metricspb.MetricsData
-	if err := unmarshal(msg, &data); err != nil {
-		_ = msg.Ack()
-		return
-	}
-
-	if r.metricsHandler != nil {
-		handlerErr = r.metricsHandler(ctx, &data)
-	}
-
-	if r.metricsCh != nil {
-		select {
-		case r.metricsCh <- &data:
-		default:
-		}
-	}
-
+	msgT := MessageFrom[metricspb.MetricsData](msg)
+	handlerErr := r.metricsMessageHandler(ctx, msgT)
 	r.ackOrNak(msg, handlerErr)
 }
 
 // ackOrNak acknowledges or negatively acknowledges a message based on error.
-func (r *Receiver) ackOrNak(msg message, err error) {
+func (r *receiverImpl) ackOrNak(msg message, err error) {
 	if err != nil {
 		_ = msg.Nak()
 	} else {
@@ -649,7 +449,7 @@ func (r *Receiver) ackOrNak(msg message, err error) {
 }
 
 // Shutdown stops the receiver and waits for in-flight messages to complete.
-func (r *Receiver) Shutdown(ctx context.Context) error {
+func (r *receiverImpl) Shutdown(ctx context.Context) error {
 	r.mu.Lock()
 	if r.shutdown {
 		r.mu.Unlock()
@@ -684,19 +484,6 @@ func (r *Receiver) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-
-	// Close channels
-	r.mu.Lock()
-	if r.logsCh != nil {
-		close(r.logsCh)
-	}
-	if r.tracesCh != nil {
-		close(r.tracesCh)
-	}
-	if r.metricsCh != nil {
-		close(r.metricsCh)
-	}
-	r.mu.Unlock()
 
 	return nil
 }
