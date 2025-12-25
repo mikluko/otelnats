@@ -37,7 +37,8 @@ func TestJetStreamIntegration(t *testing.T) {
 	ns := startEmbeddedNATSWithJetStream(t)
 	nc := connectToNATS(t, ns)
 	js := createJetStream(t, nc)
-	ctx := t.Context()
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second*2)
+	defer cancel()
 
 	// Create stream using native jetstream API with OTLPSubjects helper
 	stream, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
@@ -78,7 +79,7 @@ func TestJetStreamIntegration(t *testing.T) {
 	select {
 	case <-received:
 		// OK
-	case <-time.After(5 * time.Second):
+	case <-ctx.Done():
 		t.Fatal("timeout waiting for message")
 	}
 

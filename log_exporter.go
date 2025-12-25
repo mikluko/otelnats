@@ -65,9 +65,9 @@ func (e *LogExporter) Export(ctx context.Context, records []sdklog.Record) error
 
 	// Build message with headers
 	msg := &nats.Msg{
-		Subject: e.config.subject(signalLogs),
+		Subject: e.config.subject(SignalLogs),
 		Data:    data,
-		Header:  e.config.buildHeaders(ctx, signalLogs),
+		Header:  e.config.buildHeaders(ctx, SignalLogs),
 	}
 
 	// Publish with appropriate method

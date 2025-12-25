@@ -70,8 +70,8 @@ func TestTraceExporter_ExportSpans(t *testing.T) {
 		msg := requireMessage(t, sub, 5*time.Second)
 
 		// Check headers
-		require.Equal(t, contentTypeProtobuf, msg.Header.Get(headerContentType))
-		require.Equal(t, signalTraces, msg.Header.Get(headerOtelSignal))
+		require.Equal(t, ContentTypeProtobuf, msg.Header.Get(HeaderContentType))
+		require.Equal(t, SignalTraces, msg.Header.Get(HeaderOtelSignal))
 
 		// Verify payload is valid protobuf
 		var tracesData tracepb.TracesData

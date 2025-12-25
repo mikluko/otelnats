@@ -65,9 +65,9 @@ func (e *TraceExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOn
 
 	// Build message with headers
 	msg := &nats.Msg{
-		Subject: e.config.subject(signalTraces),
+		Subject: e.config.subject(SignalTraces),
 		Data:    data,
-		Header:  e.config.buildHeaders(ctx, signalTraces),
+		Header:  e.config.buildHeaders(ctx, SignalTraces),
 	}
 
 	// Publish with appropriate method

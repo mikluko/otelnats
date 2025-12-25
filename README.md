@@ -274,6 +274,92 @@ func (r *Receiver) Start(ctx context.Context) error
 func (r *Receiver) Shutdown(ctx context.Context) error
 ```
 
+### Protocol Primitives
+
+For building protocol-compatible implementations (custom exporters, receivers, gateways, testing tools), `otelnats` exports low-level protocol primitives:
+
+```go
+// Protocol constants
+const (
+    HeaderContentType = "Content-Type"
+    HeaderOtelSignal  = "Otel-Signal"
+
+    ContentTypeProtobuf = "application/x-protobuf"
+    ContentTypeJSON     = "application/json"
+
+    SignalTraces  = "traces"
+    SignalMetrics = "metrics"
+    SignalLogs    = "logs"
+)
+
+// Encoding type
+type Encoding int
+
+const (
+    EncodingProtobuf Encoding = iota  // Default: binary protobuf
+    EncodingJSON                      // JSON encoding
+)
+
+// Subject construction
+func BuildSubject(prefix, signal, suffix string) string
+
+// Header construction
+func BuildHeaders(
+    ctx context.Context,
+    signal string,
+    encoding Encoding,
+    customHeaders func(context.Context) nats.Header,
+) nats.Header
+
+// Encoding helpers
+func ContentType(enc Encoding) string
+func Marshal(m proto.Message, enc Encoding) ([]byte, error)
+func Unmarshal(data []byte, contentType string, m proto.Message) error
+
+// Publishing
+func PublishMessage(ctx context.Context, pub publisher, msg *nats.Msg) error
+
+type publisher interface { PublishMsg(*nats.Msg) error }
+type flusher interface { FlushWithContext(context.Context) error }
+```
+
+**Example**: Custom exporter using protocol primitives
+
+```go
+package main
+
+import (
+    "context"
+
+    "github.com/mikluko/otelnats"
+    "github.com/nats-io/nats.go"
+    logspb "go.opentelemetry.io/proto/otlp/logs/v1"
+)
+
+func main() {
+    nc, _ := nats.Connect(nats.DefaultURL)
+    defer nc.Close()
+
+    ctx := context.Background()
+
+    // Build OTLP message
+    logsData := &logspb.LogsData{ /* ... */ }
+
+    // Serialize with protocol primitives
+    data, _ := otelnats.Marshal(logsData, otelnats.EncodingProtobuf)
+
+    // Build message
+    msg := &nats.Msg{
+        Subject: otelnats.BuildSubject("otel", otelnats.SignalLogs, "tenant-a"),
+        Data:    data,
+        Header:  otelnats.BuildHeaders(ctx, otelnats.SignalLogs, otelnats.EncodingProtobuf, nil),
+    }
+
+    // Publish
+    otelnats.PublishMessage(ctx, nc, msg)
+}
+```
+
 ## Roadmap
 
 - [x] JetStream consumer support for receivers (durable subscriptions, ack/nak)

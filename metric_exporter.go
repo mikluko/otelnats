@@ -81,9 +81,9 @@ func (e *MetricExporter) Export(ctx context.Context, rm *metricdata.ResourceMetr
 
 	// Build message with headers
 	msg := &nats.Msg{
-		Subject: e.config.subject(signalMetrics),
+		Subject: e.config.subject(SignalMetrics),
 		Data:    data,
-		Header:  e.config.buildHeaders(ctx, signalMetrics),
+		Header:  e.config.buildHeaders(ctx, SignalMetrics),
 	}
 
 	// Publish with appropriate method

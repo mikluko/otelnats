@@ -69,8 +69,8 @@ func TestLogExporter_Export(t *testing.T) {
 		msg := requireMessage(t, sub, 5*time.Second)
 
 		// Check headers
-		require.Equal(t, contentTypeProtobuf, msg.Header.Get(headerContentType))
-		require.Equal(t, signalLogs, msg.Header.Get(headerOtelSignal))
+		require.Equal(t, ContentTypeProtobuf, msg.Header.Get(HeaderContentType))
+		require.Equal(t, SignalLogs, msg.Header.Get(HeaderOtelSignal))
 
 		// Verify payload is valid protobuf
 		var logsData logspb.LogsData
@@ -108,8 +108,8 @@ func TestLogExporter_Export(t *testing.T) {
 		msg := requireMessage(t, sub, 5*time.Second)
 
 		// Built-in headers should be present
-		require.Equal(t, contentTypeProtobuf, msg.Header.Get(headerContentType))
-		require.Equal(t, signalLogs, msg.Header.Get(headerOtelSignal))
+		require.Equal(t, ContentTypeProtobuf, msg.Header.Get(HeaderContentType))
+		require.Equal(t, SignalLogs, msg.Header.Get(HeaderOtelSignal))
 
 		// Custom header should be present
 		require.Equal(t, "value", msg.Header.Get("X-Custom"))

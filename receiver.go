@@ -9,7 +9,6 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
@@ -285,21 +284,21 @@ func (r *Receiver) Start(ctx context.Context) error {
 
 	// Subscribe to logs if handler or channel is set
 	if r.logsHandler != nil || r.logsCh != nil {
-		if err := r.subscribe(ctx, signalLogs, r.handleLogs); err != nil {
+		if err := r.subscribe(ctx, SignalLogs, r.handleLogs); err != nil {
 			return err
 		}
 	}
 
 	// Subscribe to traces if handler or channel is set
 	if r.tracesHandler != nil || r.tracesCh != nil {
-		if err := r.subscribe(ctx, signalTraces, r.handleTraces); err != nil {
+		if err := r.subscribe(ctx, SignalTraces, r.handleTraces); err != nil {
 			return err
 		}
 	}
 
 	// Subscribe to metrics if handler or channel is set
 	if r.metricsHandler != nil || r.metricsCh != nil {
-		if err := r.subscribe(ctx, signalMetrics, r.handleMetrics); err != nil {
+		if err := r.subscribe(ctx, SignalMetrics, r.handleMetrics); err != nil {
 			return err
 		}
 	}
@@ -318,13 +317,10 @@ type message interface {
 
 // unmarshal decodes message data based on Content-Type header.
 // Supports both protobuf (default) and JSON encoding.
+// This is a thin wrapper around the exported Unmarshal function.
 func unmarshal(msg message, v proto.Message) error {
-	contentType := msg.Headers().Get(headerContentType)
-	if contentType == contentTypeJSON {
-		return protojson.Unmarshal(msg.Data(), v)
-	}
-	// Default to protobuf for backward compatibility
-	return proto.Unmarshal(msg.Data(), v)
+	contentType := msg.Headers().Get(HeaderContentType)
+	return Unmarshal(msg.Data(), contentType, v)
 }
 
 // msgHandler is a generic handler for messages
