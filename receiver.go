@@ -46,6 +46,7 @@ type receiverImpl struct {
 	logsMessageHandler    MessageHandler[logspb.LogsData]
 	tracesMessageHandler  MessageHandler[tracespb.TracesData]
 	metricsMessageHandler MessageHandler[metricspb.MetricsData]
+	errorHandler          ErrorHandler
 
 	// Core NATS subscriptions
 	subs []*nats.Subscription
@@ -59,6 +60,10 @@ type receiverImpl struct {
 	// In-flight message tracking
 	wg sync.WaitGroup
 }
+
+// ErrorHandler is called when an error occurs in an async context where it cannot be returned.
+// This includes errors from Nak(), Ack(), Term(), and other operations in message processing goroutines.
+type ErrorHandler func(error)
 
 type receiverConfig struct {
 	subjectPrefix string
@@ -77,6 +82,7 @@ type receiverConfig struct {
 	logsHandler    MessageHandler[logspb.LogsData]
 	tracesHandler  MessageHandler[tracespb.TracesData]
 	metricsHandler MessageHandler[metricspb.MetricsData]
+	errorHandler   ErrorHandler
 }
 
 func defaultReceiverConfig() *receiverConfig {
@@ -89,6 +95,10 @@ func defaultReceiverConfig() *receiverConfig {
 		logsHandler:    nil,
 		tracesHandler:  nil,
 		metricsHandler: nil,
+		// Default error handler panics to ensure errors are not silently ignored
+		errorHandler: func(err error) {
+			panic(fmt.Sprintf("otelnats receiver error: %v", err))
+		},
 	}
 }
 
@@ -195,6 +205,24 @@ func WithReceiverMetricsHandler(fn MessageHandler[metricspb.MetricsData]) Receiv
 	}
 }
 
+// WithReceiverErrorHandler sets a custom error handler for async errors.
+// These are errors that occur in goroutines where they cannot be returned to the caller,
+// such as Nak(), Ack(), Term() failures, or subscription errors.
+//
+// The default error handler panics to ensure errors are not silently ignored.
+// Set a custom handler to log errors or handle them gracefully.
+//
+// Example:
+//
+//	WithReceiverErrorHandler(func(err error) {
+//	    log.Printf("receiver error: %v", err)
+//	})
+func WithReceiverErrorHandler(fn ErrorHandler) ReceiverOption {
+	return func(r *receiverConfig) {
+		r.errorHandler = fn
+	}
+}
+
 // NewReceiver creates a new receiver that consumes from NATS.
 func NewReceiver(nc *nats.Conn, opts ...ReceiverOption) (Receiver, error) {
 	if nc == nil {
@@ -212,6 +240,7 @@ func NewReceiver(nc *nats.Conn, opts ...ReceiverOption) (Receiver, error) {
 		logsMessageHandler:    cfg.logsHandler,
 		tracesMessageHandler:  cfg.tracesHandler,
 		metricsMessageHandler: cfg.metricsHandler,
+		errorHandler:          cfg.errorHandler,
 	}, nil
 }
 
@@ -265,7 +294,7 @@ func (r *receiverImpl) subscribe(ctx context.Context) error {
 
 	// Core NATS subscription - route messages by header
 	natsMsgHandler := func(msg *nats.Msg) {
-		r.routeMessage(ctx, &coreNatsMsg{msg: msg})
+		r.routeMessage(&coreNatsMsg{msg: msg})
 	}
 
 	var sub *nats.Subscription
@@ -306,36 +335,44 @@ func (m *coreNatsMsg) Nak() error {
 // routeMessage routes a message to the appropriate handler based on the Otel-Signal header.
 // For messages with unconfigured handlers, sends NAK to trigger redelivery.
 // For messages with unknown/missing signal headers, terminates the message.
-func (r *receiverImpl) routeMessage(ctx context.Context, msg message) {
+func (r *receiverImpl) routeMessage(msg message) {
 	signal := msg.Headers().Get(HeaderOtelSignal)
 
 	switch signal {
 	case SignalLogs:
 		if r.logsMessageHandler == nil {
-			_ = msg.Nak() // No handler configured, NAK for redelivery
+			if err := msg.Nak(); err != nil {
+				r.errorHandler(err)
+			}
 			return
 		}
 		r.handleLogs(msg)
 
 	case SignalTraces:
 		if r.tracesMessageHandler == nil {
-			_ = msg.Nak() // No handler configured, NAK for redelivery
+			if err := msg.Nak(); err != nil {
+				r.errorHandler(err)
+			}
 			return
 		}
 		r.handleTraces(msg)
 
 	case SignalMetrics:
 		if r.metricsMessageHandler == nil {
-			_ = msg.Nak() // No handler configured, NAK for redelivery
+			if err := msg.Nak(); err != nil {
+				r.errorHandler(err)
+			}
 			return
 		}
-		r.handleMetrics(ctx, msg)
+		r.handleMetrics(msg)
 
 	default:
 		// Unknown or missing signal header - terminate the message
 		// This prevents infinite redelivery of malformed messages
 		if jsmsg, ok := msg.(interface{ Term() error }); ok {
-			_ = jsmsg.Term()
+			if err := jsmsg.Term(); err != nil {
+				r.errorHandler(err)
+			}
 		}
 		// For core NATS, just ignore (no ack/nak needed)
 	}
@@ -439,7 +476,7 @@ func (r *receiverImpl) subscribeJetStream(ctx context.Context, subject string) e
 	// Start worker goroutine to route messages from backlog by header
 	go func() {
 		for msg := range backlog {
-			r.routeMessage(ctx, msg)
+			r.routeMessage(msg)
 		}
 	}()
 
@@ -451,8 +488,8 @@ func (r *receiverImpl) subscribeJetStream(ctx context.Context, subject string) e
 		select {
 		case backlog <- msg:
 		default:
-			if jsmsg, ok := msg.(interface{ Nak() error }); ok {
-				_ = jsmsg.Nak()
+			if err := msg.Nak(); err != nil {
+				// TODO: pass to error handler
 			}
 		}
 	})
@@ -485,10 +522,11 @@ func (r *receiverImpl) handleTraces(msg message) {
 	r.ackOrNak(msg, handlerErr)
 }
 
-func (r *receiverImpl) handleMetrics(ctx context.Context, msg message) {
+func (r *receiverImpl) handleMetrics(msg message) {
 	r.wg.Add(1)
 	defer r.wg.Done()
 
+	ctx := context.Background()
 	msgT := MessageFrom[metricspb.MetricsData](msg)
 	handlerErr := r.metricsMessageHandler(ctx, msgT)
 	r.ackOrNak(msg, handlerErr)
@@ -497,10 +535,25 @@ func (r *receiverImpl) handleMetrics(ctx context.Context, msg message) {
 // ackOrNak acknowledges or negatively acknowledges a message based on error.
 func (r *receiverImpl) ackOrNak(msg message, err error) {
 	if err != nil {
-		_ = msg.Nak()
+		if nakErr := msg.Nak(); nakErr != nil {
+			// Ignore "already acknowledged" errors - handler may have ack'd/nak'd manually
+			if !isAlreadyAckedError(nakErr) {
+				r.errorHandler(nakErr)
+			}
+		}
 	} else {
-		_ = msg.Ack()
+		if ackErr := msg.Ack(); ackErr != nil {
+			// Ignore "already acknowledged" errors - handler may have ack'd/nak'd manually
+			if !isAlreadyAckedError(ackErr) {
+				r.errorHandler(ackErr)
+			}
+		}
 	}
+}
+
+// isAlreadyAckedError checks if an error is due to a message being already acknowledged.
+func isAlreadyAckedError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "already acknowledged")
 }
 
 // Shutdown stops the receiver and waits for in-flight messages to complete.
@@ -521,7 +574,9 @@ func (r *receiverImpl) Shutdown(ctx context.Context) error {
 
 	// Unsubscribe core NATS subscriptions
 	for _, sub := range subs {
-		_ = sub.Unsubscribe()
+		if err := sub.Unsubscribe(); err != nil {
+			r.errorHandler(err)
+		}
 	}
 
 	// Drain JetStream consume contexts to stop message delivery gracefully
