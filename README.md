@@ -327,17 +327,19 @@ type Receiver interface {
 // Constructor
 func NewReceiver(nc *nats.Conn, opts ...ReceiverOption) (Receiver, error)
 
-// Message interface
-type Message[T any] interface {
+// MessageSignal interface - combines message metadata with typed signal data
+type MessageSignal[T any] interface {
+    Subject() string      // NATS subject
     Data() []byte         // Access raw message bytes
     Headers() nats.Header // Access message headers
     Ack() error          // Acknowledge (JetStream only)
     Nak() error          // Negative acknowledge (JetStream only)
-    Item() (*T, error)    // Access typed data (lazy unmarshal)
+    Term() error         // Terminate (JetStream only)
+    Signal() (*T, error)  // Access typed signal data (lazy unmarshal)
 }
 
 // Message handler type
-type MessageHandler[T any] func(ctx context.Context, msg Message[T]) error
+type MessageHandler[T any] func(ctx context.Context, msg MessageSignal[T]) error
 
 // Handler options (passed to NewReceiver)
 func WithReceiverLogsHandler(fn MessageHandler[logspb.LogsData]) ReceiverOption
