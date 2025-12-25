@@ -16,6 +16,16 @@ import (
 	tracespb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
 
+type Message[T any] interface {
+	Item() T
+	Data() []byte
+	Headers() nats.Header
+	Ack() error
+	Nak() error
+}
+
+type MessageHandler[T any] func(ctx context.Context, signal string, msg Message[T]) error
+
 // LogsHandler is called when log data is received.
 type LogsHandler func(context.Context, *logspb.LogsData) error
 
@@ -34,7 +44,12 @@ type Receiver struct {
 	started  bool
 	shutdown bool
 
-	// Handlers
+	// Handlers (generic MessageHandlers take precedence over typed handlers)
+	logsMessageHandler    MessageHandler[logspb.LogsData]
+	tracesMessageHandler  MessageHandler[tracespb.TracesData]
+	metricsMessageHandler MessageHandler[metricspb.MetricsData]
+
+	// Legacy typed handlers (deprecated in favor of MessageHandler)
 	logsHandler    LogsHandler
 	tracesHandler  TracesHandler
 	metricsHandler MetricsHandler
@@ -198,9 +213,40 @@ func NewReceiver(nc *nats.Conn, opts ...ReceiverOption) (*Receiver, error) {
 	}, nil
 }
 
+// OnLogsMessage registers a generic handler for log messages.
+// The handler receives both typed and raw access to message data.
+// Takes precedence over OnLogs if both are set.
+// Must be called before Start.
+func (r *Receiver) OnLogsMessage(fn MessageHandler[logspb.LogsData]) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.logsMessageHandler = fn
+}
+
+// OnTracesMessage registers a generic handler for trace messages.
+// The handler receives both typed and raw access to message data.
+// Takes precedence over OnTraces if both are set.
+// Must be called before Start.
+func (r *Receiver) OnTracesMessage(fn MessageHandler[tracespb.TracesData]) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tracesMessageHandler = fn
+}
+
+// OnMetricsMessage registers a generic handler for metric messages.
+// The handler receives both typed and raw access to message data.
+// Takes precedence over OnMetrics if both are set.
+// Must be called before Start.
+func (r *Receiver) OnMetricsMessage(fn MessageHandler[metricspb.MetricsData]) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.metricsMessageHandler = fn
+}
+
 // OnLogs registers a handler for log data.
 // The handler is called for each received log message.
 // Must be called before Start.
+// Deprecated: Use OnLogsMessage for more flexibility.
 func (r *Receiver) OnLogs(fn LogsHandler) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -210,6 +256,7 @@ func (r *Receiver) OnLogs(fn LogsHandler) {
 // OnTraces registers a handler for trace data.
 // The handler is called for each received trace message.
 // Must be called before Start.
+// Deprecated: Use OnTracesMessage for more flexibility.
 func (r *Receiver) OnTraces(fn TracesHandler) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -219,6 +266,7 @@ func (r *Receiver) OnTraces(fn TracesHandler) {
 // OnMetrics registers a handler for metric data.
 // The handler is called for each received metric message.
 // Must be called before Start.
+// Deprecated: Use OnMetricsMessage for more flexibility.
 func (r *Receiver) OnMetrics(fn MetricsHandler) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -274,22 +322,22 @@ func (r *Receiver) Start(ctx context.Context) error {
 		return nil
 	}
 
-	// Subscribe to logs if handler or channel is set
-	if r.logsHandler != nil || r.logsCh != nil {
+	// Subscribe to logs if any handler or channel is set
+	if r.logsMessageHandler != nil || r.logsHandler != nil || r.logsCh != nil {
 		if err := r.subscribe(ctx, SignalLogs, r.handleLogs); err != nil {
 			return err
 		}
 	}
 
-	// Subscribe to traces if handler or channel is set
-	if r.tracesHandler != nil || r.tracesCh != nil {
+	// Subscribe to traces if any handler or channel is set
+	if r.tracesMessageHandler != nil || r.tracesHandler != nil || r.tracesCh != nil {
 		if err := r.subscribe(ctx, SignalTraces, r.handleTraces); err != nil {
 			return err
 		}
 	}
 
-	// Subscribe to metrics if handler or channel is set
-	if r.metricsHandler != nil || r.metricsCh != nil {
+	// Subscribe to metrics if any handler or channel is set
+	if r.metricsMessageHandler != nil || r.metricsHandler != nil || r.metricsCh != nil {
 		if err := r.subscribe(ctx, SignalMetrics, r.handleMetrics); err != nil {
 			return err
 		}
@@ -370,6 +418,54 @@ func (m *coreNatsMsg) Nak() error {
 	return nil // Core NATS doesn't support nak
 }
 
+// genericMessage wraps a message and provides generic typed access with lazy unmarshaling
+type genericMessage[T any] struct {
+	msg     message
+	item    *T
+	itemErr error
+	once    sync.Once
+}
+
+func newGenericMessage[T any](msg message) *genericMessage[T] {
+	return &genericMessage[T]{msg: msg}
+}
+
+func (m *genericMessage[T]) Item() T {
+	m.once.Do(func() {
+		var v T
+		contentType := m.msg.Headers().Get(HeaderContentType)
+		// T must be a proto.Message, so we need to convert it
+		// This works because logspb.LogsData, tracespb.TracesData, metricspb.MetricsData all implement proto.Message
+		if protoMsg, ok := any(&v).(proto.Message); ok {
+			m.itemErr = Unmarshal(m.msg.Data(), contentType, protoMsg)
+			if m.itemErr == nil {
+				m.item = &v
+			}
+		}
+	})
+	if m.item != nil {
+		return *m.item
+	}
+	var zero T
+	return zero
+}
+
+func (m *genericMessage[T]) Data() []byte {
+	return m.msg.Data()
+}
+
+func (m *genericMessage[T]) Headers() nats.Header {
+	return m.msg.Headers()
+}
+
+func (m *genericMessage[T]) Ack() error {
+	return m.msg.Ack()
+}
+
+func (m *genericMessage[T]) Nak() error {
+	return m.msg.Nak()
+}
+
 func (r *Receiver) subscribeJetStream(ctx context.Context, subject string, handler msgHandler) error {
 	consumerName := r.config.consumerName
 	if consumerName == "" {
@@ -433,6 +529,19 @@ func (r *Receiver) handleLogs(msg message) {
 	r.wg.Add(1)
 	defer r.wg.Done()
 
+	ctx := context.Background()
+	var handlerErr error
+
+	// Priority 1: Generic message handler (provides both typed and raw access)
+	if r.logsMessageHandler != nil {
+		genericMsg := newGenericMessage[logspb.LogsData](msg)
+		handlerErr = r.logsMessageHandler(ctx, SignalLogs, genericMsg)
+		r.ackOrNak(msg, handlerErr)
+		return
+	}
+
+	// Priority 2 & 3: Legacy typed handler and/or channel
+	// These require unmarshaling upfront
 	var data logspb.LogsData
 	if err := unmarshal(msg, &data); err != nil {
 		// Malformed message - ack to prevent redelivery of bad data
@@ -440,10 +549,7 @@ func (r *Receiver) handleLogs(msg message) {
 		return
 	}
 
-	ctx := context.Background()
-	var handlerErr error
-
-	// Call handler if set
+	// Call legacy handler if set
 	if r.logsHandler != nil {
 		handlerErr = r.logsHandler(ctx, &data)
 	}
@@ -465,14 +571,23 @@ func (r *Receiver) handleTraces(msg message) {
 	r.wg.Add(1)
 	defer r.wg.Done()
 
+	ctx := context.Background()
+	var handlerErr error
+
+	// Priority 1: Generic message handler (provides both typed and raw access)
+	if r.tracesMessageHandler != nil {
+		genericMsg := newGenericMessage[tracespb.TracesData](msg)
+		handlerErr = r.tracesMessageHandler(ctx, SignalTraces, genericMsg)
+		r.ackOrNak(msg, handlerErr)
+		return
+	}
+
+	// Priority 2 & 3: Legacy typed handler and/or channel
 	var data tracespb.TracesData
 	if err := unmarshal(msg, &data); err != nil {
 		_ = msg.Ack()
 		return
 	}
-
-	ctx := context.Background()
-	var handlerErr error
 
 	if r.tracesHandler != nil {
 		handlerErr = r.tracesHandler(ctx, &data)
@@ -492,14 +607,23 @@ func (r *Receiver) handleMetrics(msg message) {
 	r.wg.Add(1)
 	defer r.wg.Done()
 
+	ctx := context.Background()
+	var handlerErr error
+
+	// Priority 1: Generic message handler (provides both typed and raw access)
+	if r.metricsMessageHandler != nil {
+		genericMsg := newGenericMessage[metricspb.MetricsData](msg)
+		handlerErr = r.metricsMessageHandler(ctx, SignalMetrics, genericMsg)
+		r.ackOrNak(msg, handlerErr)
+		return
+	}
+
+	// Priority 2 & 3: Legacy typed handler and/or channel
 	var data metricspb.MetricsData
 	if err := unmarshal(msg, &data); err != nil {
 		_ = msg.Ack()
 		return
 	}
-
-	ctx := context.Background()
-	var handlerErr error
 
 	if r.metricsHandler != nil {
 		handlerErr = r.metricsHandler(ctx, &data)
