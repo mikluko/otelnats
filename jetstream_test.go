@@ -62,7 +62,7 @@ func TestJetStreamIntegration(t *testing.T) {
 		WithReceiverJetStream(js, "INTEGRATION_TEST"),
 		WithReceiverConsumerName("test-processor"),
 		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
-			_, err := msg.Item()
+			_, err := msg.Signal()
 			if err != nil {
 				return err
 			}
@@ -133,7 +133,7 @@ func TestJetStreamWithPreCreatedConsumer(t *testing.T) {
 		WithReceiverJetStream(js, "PRECREATED"),
 		WithReceiverConsumerName("pre-created-consumer"),
 		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
-			data, err := msg.Item()
+			data, err := msg.Signal()
 			if err != nil {
 				return err
 			}
@@ -203,7 +203,7 @@ func TestReceiverWithConsumerObject(t *testing.T) {
 		WithReceiverJetStream(js, "WITHCONSUMER"),
 		WithReceiverConsumer(consumer),
 		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
-			data, err := msg.Item()
+			data, err := msg.Signal()
 			if err != nil {
 				return err
 			}
@@ -271,7 +271,7 @@ func TestMultiTenantWithSuffix(t *testing.T) {
 		WithReceiverSubjectSuffix(">"),
 		WithReceiverJetStream(js, "MULTI_TENANT"),
 		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
-			data, err := msg.Item()
+			data, err := msg.Signal()
 			if err != nil {
 				return err
 			}

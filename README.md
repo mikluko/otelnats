@@ -86,12 +86,12 @@ func main() {
 	defer nc.Close()
 
 	recv, _ := otelnats.NewReceiver(nc,
-		otelnats.WithReceiverLogsHandler(func(ctx context.Context, msg otelnats.Message[logspb.LogsData]) error {
-			data, err := msg.Item()
+		otelnats.WithReceiverLogsHandler(func(ctx context.Context, msg otelnats.MessageSignal[logspb.LogsData]) error {
+			signal, err := msg.Signal()
 			if err != nil {
 				return err
 			}
-			for _, rl := range data.ResourceLogs {
+			for _, rl := range signal.ResourceLogs {
 				for _, sl := range rl.ScopeLogs {
 					for _, lr := range sl.LogRecords {
 						fmt.Printf("[%s] %s\n", lr.SeverityText, lr.Body.GetStringValue())
@@ -171,13 +171,13 @@ For performance-critical or custom processing scenarios, use the generic `Messag
 
 ```go
 recv, _ := otelnats.NewReceiver(nc,
-    otelnats.WithReceiverLogsHandler(func(ctx context.Context, msg otelnats.Message[logspb.LogsData]) error {
+    otelnats.WithReceiverLogsHandler(func(ctx context.Context, msg otelnats.MessageSignal[logspb.LogsData]) error {
         // Option 1: Access typed data (lazy unmarshaling)
-        data, err := msg.Item()
+        signal, err := msg.Signal()
         if err != nil {
             return err
         }
-        for _, rl := range data.ResourceLogs {
+        for _, rl := range signal.ResourceLogs {
             // Process logs...
         }
 
@@ -198,7 +198,7 @@ recv, _ := otelnats.NewReceiver(nc,
 **1. Performance optimization** — Avoid double unmarshaling:
 ```go
 recv, _ := otelnats.NewReceiver(nc,
-    otelnats.WithReceiverLogsHandler(func(ctx context.Context, msg otelnats.Message[logspb.LogsData]) error {
+    otelnats.WithReceiverLogsHandler(func(ctx context.Context, msg otelnats.MessageSignal[logspb.LogsData]) error {
         // Access raw bytes to pass to downstream processor without unmarshaling
         return forwardToProcessor(msg.Data(), msg.Headers())
     }),
@@ -208,7 +208,7 @@ recv, _ := otelnats.NewReceiver(nc,
 **2. Custom unmarshaling** — Unmarshal to different types:
 ```go
 recv, _ := otelnats.NewReceiver(nc,
-    otelnats.WithReceiverLogsHandler(func(ctx context.Context, msg otelnats.Message[logspb.LogsData]) error {
+    otelnats.WithReceiverLogsHandler(func(ctx context.Context, msg otelnats.MessageSignal[logspb.LogsData]) error {
         // Unmarshal to custom type for collector implementations
         var customData MyCustomLogsFormat
         contentType := msg.Headers().Get(otelnats.HeaderContentType)
@@ -223,7 +223,7 @@ recv, _ := otelnats.NewReceiver(nc,
 **3. Conditional processing** — Inspect headers before unmarshaling:
 ```go
 recv, _ := otelnats.NewReceiver(nc,
-    otelnats.WithReceiverLogsHandler(func(ctx context.Context, msg otelnats.Message[logspb.LogsData]) error {
+    otelnats.WithReceiverLogsHandler(func(ctx context.Context, msg otelnats.MessageSignal[logspb.LogsData]) error {
         // Check headers first
         tenant := msg.Headers().Get("X-Tenant-ID")
         if !shouldProcess(tenant) {
@@ -231,7 +231,7 @@ recv, _ := otelnats.NewReceiver(nc,
         }
 
         // Only unmarshal when needed
-        data, err := msg.Item()
+        data, err := msg.Signal()
         if err != nil {
             return err
         }
@@ -329,11 +329,11 @@ func NewReceiver(nc *nats.Conn, opts ...ReceiverOption) (Receiver, error)
 
 // Message interface
 type Message[T any] interface {
-    Item() (*T, error)    // Access typed data (lazy unmarshal)
     Data() []byte         // Access raw message bytes
     Headers() nats.Header // Access message headers
     Ack() error          // Acknowledge (JetStream only)
     Nak() error          // Negative acknowledge (JetStream only)
+    Item() (*T, error)    // Access typed data (lazy unmarshal)
 }
 
 // Message handler type

@@ -106,7 +106,7 @@
 //	    otelnats.WithReceiverJetStream(js, "otlp-stream"),
 //	    otelnats.WithReceiverConsumerName("my-consumer"),
 //	    otelnats.WithReceiverLogsHandler(func(ctx context.Context, msg otelnats.Message[logspb.LogsData]) error {
-//	        data, err := msg.Item()
+//	        data, err := msg.Signal()
 //	        if err != nil {
 //	            return err
 //	        }

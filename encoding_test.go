@@ -71,7 +71,7 @@ func TestJSONEncoding_Roundtrip(t *testing.T) {
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("jsonrt"),
 		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
-			data, err := msg.Item()
+			data, err := msg.Signal()
 			if err != nil {
 				return err
 			}
@@ -178,7 +178,7 @@ func TestMixedEncoding_ReceiverAutoDetects(t *testing.T) {
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("mixed"),
 		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
-			data, err := msg.Item()
+			data, err := msg.Signal()
 			if err != nil {
 				return err
 			}

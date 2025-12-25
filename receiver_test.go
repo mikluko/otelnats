@@ -47,7 +47,7 @@ func TestReceiver_MessageHandlerAPI(t *testing.T) {
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("mh"),
 		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
-			data, err := msg.Item()
+			data, err := msg.Signal()
 			if err != nil {
 				return err
 			}
@@ -103,7 +103,7 @@ func TestReceiver_QueueGroup(t *testing.T) {
 		WithReceiverSubjectPrefix("qg"),
 		WithReceiverQueueGroup("test-group"),
 		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
-			_, err := msg.Item()
+			_, err := msg.Signal()
 			if err != nil {
 				return err
 			}
@@ -117,7 +117,7 @@ func TestReceiver_QueueGroup(t *testing.T) {
 		WithReceiverSubjectPrefix("qg"),
 		WithReceiverQueueGroup("test-group"),
 		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
-			_, err := msg.Item()
+			_, err := msg.Signal()
 			if err != nil {
 				return err
 			}
@@ -166,7 +166,7 @@ func TestReceiver_Shutdown(t *testing.T) {
 
 	recv, err := NewReceiver(nc,
 		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
-			_, err := msg.Item()
+			_, err := msg.Signal()
 			if err != nil {
 				return err
 			}
@@ -229,7 +229,7 @@ func TestReceiver_JetStream(t *testing.T) {
 		WithReceiverSubjectPrefix("jsrecv"),
 		WithReceiverJetStream(js, streamName),
 		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
-			data, err := msg.Item()
+			data, err := msg.Signal()
 			if err != nil {
 				return err
 			}
@@ -277,7 +277,7 @@ func TestReceiver_JetStream_DurableConsumer(t *testing.T) {
 		WithReceiverJetStream(js, streamName),
 		WithReceiverConsumerName("test-consumer"),
 		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
-			data, err := msg.Item()
+			data, err := msg.Signal()
 			if err != nil {
 				return err
 			}
@@ -339,7 +339,7 @@ func TestReceiver_JetStream_NakOnError(t *testing.T) {
 		WithReceiverJetStream(js, streamName),
 		WithReceiverAckWait(500*time.Millisecond), // Short ack wait for faster test
 		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
-			_, err := msg.Item()
+			_, err := msg.Signal()
 			if err != nil {
 				return err
 			}
@@ -391,7 +391,7 @@ func TestReceiver_JetStream_QueueGroup(t *testing.T) {
 		WithReceiverJetStream(js2, streamName),
 		WithReceiverQueueGroup("test-group"),
 		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
-			_, err := msg.Item()
+			_, err := msg.Signal()
 			if err != nil {
 				return err
 			}
@@ -406,7 +406,7 @@ func TestReceiver_JetStream_QueueGroup(t *testing.T) {
 		WithReceiverJetStream(js3, streamName),
 		WithReceiverQueueGroup("test-group"),
 		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
-			_, err := msg.Item()
+			_, err := msg.Signal()
 			if err != nil {
 				return err
 			}
@@ -454,8 +454,8 @@ func TestReceiver_MessageHandler_TypedAccess(t *testing.T) {
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("msg"),
 		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
-			// Access typed data via Item()
-			data, err := msg.Item()
+			// Access typed data via Signal()
+			data, err := msg.Signal()
 			if err != nil {
 				return err
 			}
@@ -506,7 +506,7 @@ func TestReceiver_MessageHandler_RawAccess(t *testing.T) {
 			ct := msg.Headers().Get(HeaderContentType)
 			contentType.Store(&ct)
 
-			// Don't call Item() - testing raw access only
+			// Don't call Signal() - testing raw access only
 			return nil
 		}),
 	)
@@ -555,7 +555,7 @@ func TestReceiver_MessageHandler_BothTypedAndRaw(t *testing.T) {
 				rawAccess.Store(true)
 			}
 
-			typedData, err := msg.Item()
+			typedData, err := msg.Signal()
 			if err != nil {
 				return err
 			}
@@ -645,7 +645,7 @@ func TestReceiver_MessageHandler_JetStream(t *testing.T) {
 		WithReceiverSubjectPrefix("msgjs"),
 		WithReceiverJetStream(js, streamName),
 		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
-			data, err := msg.Item()
+			data, err := msg.Signal()
 			if err != nil {
 				return err
 			}

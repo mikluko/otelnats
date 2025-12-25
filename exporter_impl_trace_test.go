@@ -155,7 +155,7 @@ func TestSpanExporter_Roundtrip(t *testing.T) {
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("rt"),
 		WithReceiverTracesHandler(func(ctx context.Context, msg MessageSignal[tracepb.TracesData]) error {
-			data, err := msg.Item()
+			data, err := msg.Signal()
 			if err != nil {
 				return err
 			}

@@ -36,8 +36,8 @@ type Message interface {
 
 type MessageSignal[T any] interface {
 	Message
-	// Item must return ErrUnmarshal if the message data is invalid
-	Item() (*T, error)
+	// Signal must return ErrUnmarshal if the message data is invalid
+	Signal() (*T, error)
 }
 
 func MessageSignalFrom[T any](msg Message) MessageSignal[T] {
@@ -609,7 +609,7 @@ type messageSignalImpl[T any] struct {
 	once    sync.Once
 }
 
-func (m *messageSignalImpl[T]) Item() (*T, error) {
+func (m *messageSignalImpl[T]) Signal() (*T, error) {
 	m.once.Do(func() {
 		contentType := m.Headers().Get(HeaderContentType)
 		// T must be a proto.Message, so we need to convert it
