@@ -72,8 +72,8 @@ type receiverImpl struct {
 	// JetStream consumers and their contexts
 	consumeContexts []jetstream.ConsumeContext
 
-	// Message backlog channels for buffering incoming messages
-	msgBacklogs []chan Message
+	// Single shared message backlog for buffering all incoming messages
+	msgBacklog chan Message
 
 	// In-flight message tracking
 	wg sync.WaitGroup
@@ -302,8 +302,8 @@ func (r *receiverImpl) subscribe(ctx context.Context) error {
 		return r.subscribeJetStream(ctx, subject)
 	}
 
-	// Core NATS subscription - use backlog for buffering
-	backlog := r.createBacklogWorker()
+	// Core NATS subscription - use shared backlog for buffering
+	backlog := r.getOrCreateBacklog()
 
 	natsMsgHandler := func(msg *nats.Msg) {
 		// Spool message into backlog channel
@@ -329,20 +329,25 @@ func (r *receiverImpl) subscribe(ctx context.Context) error {
 	return nil
 }
 
-// createBacklogWorker creates a backlog channel and starts a worker goroutine
-// that routes messages from the backlog to the appropriate handler.
-func (r *receiverImpl) createBacklogWorker() chan Message {
-	backlog := make(chan Message, r.config.backlogSize)
-	r.msgBacklogs = append(r.msgBacklogs, backlog)
+// getOrCreateBacklog returns the shared backlog channel, creating it on first call.
+// All subscriptions (core NATS and JetStream) share a single backlog for message buffering.
+func (r *receiverImpl) getOrCreateBacklog() chan Message {
+	// Return existing backlog if already created
+	if r.msgBacklog != nil {
+		return r.msgBacklog
+	}
 
-	// Start worker goroutine to route messages from backlog by header
+	// Create shared backlog channel
+	r.msgBacklog = make(chan Message, r.config.backlogSize)
+
+	// Start single worker goroutine to route all messages by header
 	go func() {
-		for msg := range backlog {
+		for msg := range r.msgBacklog {
 			r.routeMessage(msg)
 		}
 	}()
 
-	return backlog
+	return r.msgBacklog
 }
 
 // routeMessage routes a message to the appropriate handler based on the Otel-Signal header.
@@ -442,8 +447,8 @@ func (r *receiverImpl) subscribeJetStream(ctx context.Context, subject string) e
 		}
 	}
 
-	// Create backlog channel and worker for this consumer
-	backlog := r.createBacklogWorker()
+	// Use shared backlog for this consumer
+	backlog := r.getOrCreateBacklog()
 
 	// Start consuming messages using the Consume API
 	// Messages are spooled into backlog channel for async processing
@@ -530,8 +535,8 @@ func (r *receiverImpl) Shutdown(ctx context.Context) error {
 	r.subs = nil
 	consumeContexts := r.consumeContexts
 	r.consumeContexts = nil
-	msgBacklogs := r.msgBacklogs
-	r.msgBacklogs = nil
+	msgBacklog := r.msgBacklog
+	r.msgBacklog = nil
 	r.mu.Unlock()
 
 	// Unsubscribe core NATS subscriptions
@@ -559,9 +564,9 @@ func (r *receiverImpl) Shutdown(ctx context.Context) error {
 		return ctx.Err()
 	}
 
-	// Close backlog channels to allow worker goroutines to exit
-	for _, backlog := range msgBacklogs {
-		close(backlog)
+	// Close shared backlog channel to allow worker goroutine to exit
+	if msgBacklog != nil {
+		close(msgBacklog)
 	}
 
 	return nil
