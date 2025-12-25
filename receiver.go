@@ -303,7 +303,7 @@ func (r *receiverImpl) subscribe(ctx context.Context) error {
 	}
 
 	// Core NATS subscription - use shared backlog for buffering
-	backlog := r.getOrCreateBacklog()
+	backlog := r.getOrCreateBacklog(ctx)
 
 	natsMsgHandler := func(msg *nats.Msg) {
 		// Spool message into backlog channel
@@ -331,7 +331,7 @@ func (r *receiverImpl) subscribe(ctx context.Context) error {
 
 // getOrCreateBacklog returns the shared backlog channel, creating it on first call.
 // All subscriptions (core NATS and JetStream) share a single backlog for message buffering.
-func (r *receiverImpl) getOrCreateBacklog() chan Message {
+func (r *receiverImpl) getOrCreateBacklog(ctx context.Context) chan Message {
 	// Return existing backlog if already created
 	if r.msgBacklog != nil {
 		return r.msgBacklog
@@ -343,7 +343,7 @@ func (r *receiverImpl) getOrCreateBacklog() chan Message {
 	// Start single worker goroutine to route all messages by header
 	go func() {
 		for msg := range r.msgBacklog {
-			r.routeMessage(msg)
+			r.routeMessage(ctx, msg)
 		}
 	}()
 
@@ -353,7 +353,7 @@ func (r *receiverImpl) getOrCreateBacklog() chan Message {
 // routeMessage routes a message to the appropriate handler based on the Otel-Signal header.
 // For messages with unconfigured handlers, sends NAK to trigger redelivery.
 // For messages with unknown/missing signal headers, terminates the message.
-func (r *receiverImpl) routeMessage(msg Message) {
+func (r *receiverImpl) routeMessage(ctx context.Context, msg Message) {
 	signal := msg.Headers().Get(HeaderOtelSignal)
 
 	switch signal {
@@ -366,7 +366,7 @@ func (r *receiverImpl) routeMessage(msg Message) {
 			r.errorHandler(fmt.Errorf("%w: %s", ErrNoHandlerForSignal, signal))
 			return
 		}
-		r.handleLogs(msgSignal)
+		r.handleLogs(ctx, msgSignal)
 
 	case SignalTraces:
 		msgSignal := MessageSignalFrom[tracespb.TracesData](msg)
@@ -377,7 +377,7 @@ func (r *receiverImpl) routeMessage(msg Message) {
 			r.errorHandler(fmt.Errorf("%w: %s", ErrNoHandlerForSignal, signal))
 			return
 		}
-		r.handleTraces(msgSignal)
+		r.handleTraces(ctx, msgSignal)
 
 	case SignalMetrics:
 		msgSignal := MessageSignalFrom[metricspb.MetricsData](msg)
@@ -388,7 +388,7 @@ func (r *receiverImpl) routeMessage(msg Message) {
 			r.errorHandler(fmt.Errorf("%w: %s", ErrNoHandlerForSignal, signal))
 			return
 		}
-		r.handleMetrics(msgSignal)
+		r.handleMetrics(ctx, msgSignal)
 
 	default:
 		// Unknown or missing signal header - terminate the message
@@ -448,7 +448,7 @@ func (r *receiverImpl) subscribeJetStream(ctx context.Context, subject string) e
 	}
 
 	// Use shared backlog for this consumer
-	backlog := r.getOrCreateBacklog()
+	backlog := r.getOrCreateBacklog(ctx)
 
 	// Start consuming messages using the Consume API
 	// Messages are spooled into backlog channel for async processing
@@ -472,31 +472,37 @@ func (r *receiverImpl) subscribeJetStream(ctx context.Context, subject string) e
 	return nil
 }
 
-func (r *receiverImpl) handleLogs(msg MessageSignal[logspb.LogsData]) {
+func (r *receiverImpl) handleLogs(ctx context.Context, msg MessageSignal[logspb.LogsData]) {
 	r.wg.Add(1)
 	defer r.wg.Done()
 
-	ctx := context.Background()
-	handlerErr := r.logsMessageHandler(ctx, msg)
-	r.ackOrNak(msg, handlerErr)
+	err := r.logsMessageHandler(ctx, msg)
+	if err != nil {
+		r.errorHandler(err)
+	}
+	r.ackOrNak(msg, err)
 }
 
-func (r *receiverImpl) handleTraces(msg MessageSignal[tracespb.TracesData]) {
+func (r *receiverImpl) handleTraces(ctx context.Context, msg MessageSignal[tracespb.TracesData]) {
 	r.wg.Add(1)
 	defer r.wg.Done()
 
-	ctx := context.Background()
-	handlerErr := r.tracesMessageHandler(ctx, msg)
-	r.ackOrNak(msg, handlerErr)
+	err := r.tracesMessageHandler(ctx, msg)
+	if err != nil {
+		r.errorHandler(err)
+	}
+	r.ackOrNak(msg, err)
 }
 
-func (r *receiverImpl) handleMetrics(msg MessageSignal[metricspb.MetricsData]) {
+func (r *receiverImpl) handleMetrics(ctx context.Context, msg MessageSignal[metricspb.MetricsData]) {
 	r.wg.Add(1)
 	defer r.wg.Done()
 
-	ctx := context.Background()
-	handlerErr := r.metricsMessageHandler(ctx, msg)
-	r.ackOrNak(msg, handlerErr)
+	err := r.metricsMessageHandler(ctx, msg)
+	if err != nil {
+		r.errorHandler(err)
+	}
+	r.ackOrNak(msg, err)
 }
 
 // ackOrNak acknowledges or negatively acknowledges a message based on error.

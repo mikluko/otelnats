@@ -351,6 +351,9 @@ func TestReceiver_JetStream_NakOnError(t *testing.T) {
 			}
 			return nil
 		}),
+		WithReceiverErrorHandler(func(err error) {
+			require.ErrorIs(t, err, errSimulated)
+		}),
 	)
 	require.NoError(t, err)
 
@@ -596,7 +599,8 @@ func TestReceiver_MessageHandler_ErrorHandling(t *testing.T) {
 
 	// Handler that returns error - should trigger Nak
 	var callCount atomic.Int32
-	testErr := errors.New("test error")
+	errSimulated := errors.New("test error")
+	errCapturedChan := make(chan error, 1)
 
 	recv, err := NewReceiver(nc,
 		WithReceiverSubjectPrefix("error"),
@@ -606,9 +610,12 @@ func TestReceiver_MessageHandler_ErrorHandling(t *testing.T) {
 
 			// Return error on first call, success on retry
 			if callCount.Load() == 1 {
-				return testErr
+				return errSimulated
 			}
 			return nil
+		}),
+		WithReceiverErrorHandler(func(err error) {
+			errCapturedChan <- err
 		}),
 	)
 	require.NoError(t, err)
@@ -625,6 +632,9 @@ func TestReceiver_MessageHandler_ErrorHandling(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond)
 
 	require.NoError(t, recv.Shutdown(ctx))
+
+	err = <-errCapturedChan
+	require.ErrorIs(t, err, errSimulated)
 }
 
 func TestReceiver_MessageHandler_JetStream(t *testing.T) {
