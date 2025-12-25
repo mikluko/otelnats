@@ -72,7 +72,7 @@ type receiverImpl struct {
 	// JetStream consumers and their contexts
 	consumeContexts []jetstream.ConsumeContext
 
-	// MessageSignal backlog channels for JetStream
+	// Message backlog channels for buffering incoming messages
 	msgBacklogs []chan Message
 
 	// In-flight message tracking
@@ -302,9 +302,17 @@ func (r *receiverImpl) subscribe(ctx context.Context) error {
 		return r.subscribeJetStream(ctx, subject)
 	}
 
-	// Core NATS subscription - route messages by header
+	// Core NATS subscription - use backlog for buffering
+	backlog := r.createBacklogWorker()
+
 	natsMsgHandler := func(msg *nats.Msg) {
-		r.routeMessage(&messageCoreWrapper{msg: msg})
+		// Spool message into backlog channel
+		select {
+		case backlog <- &messageCoreWrapper{msg: msg}:
+		default:
+			// Backlog full - drop message (core NATS doesn't support NAK)
+			// This prevents blocking the NATS client callback
+		}
 	}
 
 	var sub *nats.Subscription
@@ -319,6 +327,22 @@ func (r *receiverImpl) subscribe(ctx context.Context) error {
 	}
 	r.subs = append(r.subs, sub)
 	return nil
+}
+
+// createBacklogWorker creates a backlog channel and starts a worker goroutine
+// that routes messages from the backlog to the appropriate handler.
+func (r *receiverImpl) createBacklogWorker() chan Message {
+	backlog := make(chan Message, r.config.backlogSize)
+	r.msgBacklogs = append(r.msgBacklogs, backlog)
+
+	// Start worker goroutine to route messages from backlog by header
+	go func() {
+		for msg := range backlog {
+			r.routeMessage(msg)
+		}
+	}()
+
+	return backlog
 }
 
 // routeMessage routes a message to the appropriate handler based on the Otel-Signal header.
@@ -418,17 +442,8 @@ func (r *receiverImpl) subscribeJetStream(ctx context.Context, subject string) e
 		}
 	}
 
-	// Create backlog channel for this consumer
-	// Buffered channel allows Consume callback to quickly spool messages without blocking
-	backlog := make(chan Message, r.config.backlogSize)
-	r.msgBacklogs = append(r.msgBacklogs, backlog)
-
-	// Start worker goroutine to route messages from backlog by header
-	go func() {
-		for msg := range backlog {
-			r.routeMessage(msg)
-		}
-	}()
+	// Create backlog channel and worker for this consumer
+	backlog := r.createBacklogWorker()
 
 	// Start consuming messages using the Consume API
 	// Messages are spooled into backlog channel for async processing
