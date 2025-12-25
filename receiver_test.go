@@ -196,11 +196,9 @@ func TestReceiver_NoSubscriptionsWithoutHandlers(t *testing.T) {
 	recv, err := NewReceiver(nc)
 	require.NoError(t, err)
 
-	// Start without any handlers - should succeed but not subscribe to anything
-	require.NoError(t, recv.Start(ctx))
-
-	// Shutdown
-	require.NoError(t, recv.Shutdown(ctx))
+	// Start without any handlers - should return error requiring explicit configuration
+	err = recv.Start(ctx)
+	require.ErrorIs(t, err, ErrNoHandlers)
 }
 
 // createTestLogRecord is defined in log_exporter_test.go

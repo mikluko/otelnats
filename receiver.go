@@ -216,7 +216,7 @@ func NewReceiver(nc *nats.Conn, opts ...ReceiverOption) (Receiver, error) {
 }
 
 // Start begins receiving messages from NATS.
-// It subscribes to subjects based on registered handlers.
+// Creates a single subscription and routes messages based on the Otel-Signal header.
 func (r *receiverImpl) Start(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -228,25 +228,15 @@ func (r *receiverImpl) Start(ctx context.Context) error {
 		return nil
 	}
 
-	// Subscribe to logs if handler is set
-	if r.logsMessageHandler != nil {
-		if err := r.subscribe(ctx, SignalLogs, r.handleLogs); err != nil {
-			return err
-		}
+	// Check if at least one handler is configured
+	if r.logsMessageHandler == nil && r.tracesMessageHandler == nil && r.metricsMessageHandler == nil {
+		return ErrNoHandlers
 	}
 
-	// Subscribe to traces if handler is set
-	if r.tracesMessageHandler != nil {
-		if err := r.subscribe(ctx, SignalTraces, r.handleTraces); err != nil {
-			return err
-		}
-	}
-
-	// Subscribe to metrics if handler is set
-	if r.metricsMessageHandler != nil {
-		if err := r.subscribe(ctx, SignalMetrics, r.handleMetrics); err != nil {
-			return err
-		}
+	// Create a single subscription with broad subject pattern
+	// Messages are routed internally based on Otel-Signal header
+	if err := r.subscribe(ctx); err != nil {
+		return err
 	}
 
 	r.started = true
@@ -261,24 +251,21 @@ type message interface {
 	Nak() error
 }
 
-// msgHandler is a generic handler for messages
-type msgHandler func(message)
-
-func (r *receiverImpl) subscribe(ctx context.Context, signal string, handler msgHandler) error {
-	subject := r.config.subjectPrefix + "." + signal
+func (r *receiverImpl) subscribe(ctx context.Context) error {
+	// Build subject pattern to match all signals
+	subject := r.config.subjectPrefix + ".>"
 	if r.config.subjectSuffix != "" {
-		subject += "." + r.config.subjectSuffix
+		subject = r.config.subjectPrefix + ".*." + r.config.subjectSuffix
 	}
 
 	// JetStream subscription
 	if r.config.jetstream != nil {
-		return r.subscribeJetStream(ctx, subject, handler)
+		return r.subscribeJetStream(ctx, subject)
 	}
 
-	// Core NATS subscription - wrap handler to work with nats.Msg
+	// Core NATS subscription - route messages by header
 	natsMsgHandler := func(msg *nats.Msg) {
-		// Create a wrapper that implements basic message interface
-		handler(&coreNatsMsg{msg: msg})
+		r.routeMessage(&coreNatsMsg{msg: msg})
 	}
 
 	var sub *nats.Subscription
@@ -314,6 +301,44 @@ func (m *coreNatsMsg) Ack() error {
 
 func (m *coreNatsMsg) Nak() error {
 	return nil // Core NATS doesn't support nak
+}
+
+// routeMessage routes a message to the appropriate handler based on the Otel-Signal header.
+// For messages with unconfigured handlers, sends NAK to trigger redelivery.
+// For messages with unknown/missing signal headers, terminates the message.
+func (r *receiverImpl) routeMessage(msg message) {
+	signal := msg.Headers().Get(HeaderOtelSignal)
+
+	switch signal {
+	case SignalLogs:
+		if r.logsMessageHandler == nil {
+			_ = msg.Nak() // No handler configured, NAK for redelivery
+			return
+		}
+		r.handleLogs(msg)
+
+	case SignalTraces:
+		if r.tracesMessageHandler == nil {
+			_ = msg.Nak() // No handler configured, NAK for redelivery
+			return
+		}
+		r.handleTraces(msg)
+
+	case SignalMetrics:
+		if r.metricsMessageHandler == nil {
+			_ = msg.Nak() // No handler configured, NAK for redelivery
+			return
+		}
+		r.handleMetrics(msg)
+
+	default:
+		// Unknown or missing signal header - terminate the message
+		// This prevents infinite redelivery of malformed messages
+		if jsmsg, ok := msg.(interface{ Term() error }); ok {
+			_ = jsmsg.Term()
+		}
+		// For core NATS, just ignore (no ack/nak needed)
+	}
 }
 
 // messageImpl wraps a message and provides generic typed access with lazy unmarshaling
@@ -361,7 +386,7 @@ func (m *messageImpl[T]) Nak() error {
 	return m.msg.Nak()
 }
 
-func (r *receiverImpl) subscribeJetStream(ctx context.Context, subject string, handler msgHandler) error {
+func (r *receiverImpl) subscribeJetStream(ctx context.Context, subject string) error {
 	consumerName := r.config.consumerName
 	if consumerName == "" {
 		// Generate ephemeral consumer name based on subject
@@ -411,10 +436,10 @@ func (r *receiverImpl) subscribeJetStream(ctx context.Context, subject string, h
 	backlog := make(chan message, r.config.backlogSize)
 	r.msgBacklogs = append(r.msgBacklogs, backlog)
 
-	// Start worker goroutine to process messages from backlog
+	// Start worker goroutine to route messages from backlog by header
 	go func() {
 		for msg := range backlog {
-			handler(msg)
+			r.routeMessage(msg)
 		}
 	}()
 
