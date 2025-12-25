@@ -7,11 +7,11 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
-// NewTraceExporter creates a new trace exporter that publishes to NATS.
+// NewSpanExporter creates a new trace exporter that publishes to NATS.
 //
 // The exporter publishes protobuf-serialized OTLP trace data to the configured
 // subject (default: "otel.traces"). Use [WithExporterSubjectPrefix] to customize.
-func NewTraceExporter(nc *nats.Conn, opts ...ExporterOption) (sdktrace.SpanExporter, error) {
+func NewSpanExporter(nc *nats.Conn, opts ...ExporterOption) (sdktrace.SpanExporter, error) {
 	if nc == nil {
 		return nil, ErrNilConnection
 	}
@@ -19,7 +19,7 @@ func NewTraceExporter(nc *nats.Conn, opts ...ExporterOption) (sdktrace.SpanExpor
 	for _, opt := range opts {
 		opt(cfg)
 	}
-	impl := traceExporterImpl{
+	impl := spanExporterImpl{
 		config:    cfg,
 		marshaler: cfg.marshaler(),
 		publisher: cfg.publisher(),
@@ -30,9 +30,9 @@ func NewTraceExporter(nc *nats.Conn, opts ...ExporterOption) (sdktrace.SpanExpor
 	return &impl, nil
 }
 
-// traceExporterImpl exports spans to NATS.
+// spanExporterImpl exports spans to NATS.
 // It implements [go.opentelemetry.io/otel/sdk/trace.SpanExporter].
-type traceExporterImpl struct {
+type spanExporterImpl struct {
 	marshaler
 	publisher
 	*lifecycle
@@ -43,7 +43,7 @@ type traceExporterImpl struct {
 //
 // Spans are converted to OTLP protobuf format and published to the traces subject.
 // The method respects context cancellation.
-func (e *traceExporterImpl) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+func (e *spanExporterImpl) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
 	if len(spans) == 0 {
 		return nil
 	}

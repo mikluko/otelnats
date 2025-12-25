@@ -16,9 +16,9 @@ import (
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
 
-func TestNewTraceExporter(t *testing.T) {
+func TestNewSpanExporter(t *testing.T) {
 	t.Run("nil connection returns error", func(t *testing.T) {
-		exp, err := NewTraceExporter(nil)
+		exp, err := NewSpanExporter(nil)
 		require.Error(t, err)
 		require.Nil(t, exp)
 		require.Equal(t, ErrNilConnection, err)
@@ -28,19 +28,19 @@ func TestNewTraceExporter(t *testing.T) {
 		ns := startEmbeddedNATS(t)
 		nc := connectToNATS(t, ns)
 
-		exp, err := NewTraceExporter(nc)
+		exp, err := NewSpanExporter(nc)
 		require.NoError(t, err)
 		require.NotNil(t, exp)
 	})
 }
 
-func TestTraceExporter_ExportSpans(t *testing.T) {
+func TestSpanExporter_ExportSpans(t *testing.T) {
 	ns := startEmbeddedNATS(t)
 	nc := connectToNATS(t, ns)
 	ctx := t.Context()
 
 	t.Run("empty spans does nothing", func(t *testing.T) {
-		exp, err := NewTraceExporter(nc)
+		exp, err := NewSpanExporter(nc)
 		require.NoError(t, err)
 
 		err = exp.ExportSpans(ctx, nil)
@@ -51,7 +51,7 @@ func TestTraceExporter_ExportSpans(t *testing.T) {
 	})
 
 	t.Run("exports spans with correct subject and headers", func(t *testing.T) {
-		exp, err := NewTraceExporter(nc, WithExporterSubjectPrefix("test"))
+		exp, err := NewSpanExporter(nc, WithExporterSubjectPrefix("test"))
 		require.NoError(t, err)
 
 		// Subscribe to receive the message
@@ -90,12 +90,12 @@ func TestTraceExporter_ExportSpans(t *testing.T) {
 	})
 }
 
-func TestTraceExporter_Shutdown(t *testing.T) {
+func TestSpanExporter_Shutdown(t *testing.T) {
 	ns := startEmbeddedNATS(t)
 	nc := connectToNATS(t, ns)
 	ctx := t.Context()
 
-	exp, err := NewTraceExporter(nc)
+	exp, err := NewSpanExporter(nc)
 	require.NoError(t, err)
 
 	// Shutdown should succeed
@@ -108,12 +108,12 @@ func TestTraceExporter_Shutdown(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestTraceExporter_SpanGrouping(t *testing.T) {
+func TestSpanExporter_SpanGrouping(t *testing.T) {
 	ns := startEmbeddedNATS(t)
 	nc := connectToNATS(t, ns)
 	ctx := t.Context()
 
-	exp, err := NewTraceExporter(nc, WithExporterSubjectPrefix("group"))
+	exp, err := NewSpanExporter(nc, WithExporterSubjectPrefix("group"))
 	require.NoError(t, err)
 
 	sub, err := nc.SubscribeSync("group.traces")
@@ -139,13 +139,13 @@ func TestTraceExporter_SpanGrouping(t *testing.T) {
 	require.Len(t, tracesData.ResourceSpans[0].ScopeSpans[0].Spans, 2)
 }
 
-func TestTraceExporter_Roundtrip(t *testing.T) {
+func TestSpanExporter_Roundtrip(t *testing.T) {
 	ns := startEmbeddedNATS(t)
 	nc := connectToNATS(t, ns)
 	ctx := t.Context()
 
 	// Create exporter
-	exp, err := NewTraceExporter(nc, WithExporterSubjectPrefix("rt"))
+	exp, err := NewSpanExporter(nc, WithExporterSubjectPrefix("rt"))
 	require.NoError(t, err)
 
 	// Track received data
@@ -212,5 +212,5 @@ func createTestSpan(t *testing.T) sdktrace.ReadOnlySpan {
 	return stub.Snapshot()
 }
 
-// Compile-time check that traceExporterImpl implements sdktrace.SpanExporter
-var _ sdktrace.SpanExporter = (*traceExporterImpl)(nil)
+// Compile-time check that spanExporterImpl implements sdktrace.SpanExporter
+var _ sdktrace.SpanExporter = (*spanExporterImpl)(nil)

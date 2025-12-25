@@ -102,12 +102,12 @@ func TestJSONEncoding_Roundtrip(t *testing.T) {
 	}
 }
 
-func TestJSONEncoding_TraceExporter(t *testing.T) {
+func TestJSONEncoding_SpanExporter(t *testing.T) {
 	ns := startEmbeddedNATS(t)
 	nc := connectToNATS(t, ns)
 	ctx := t.Context()
 
-	exp, err := NewTraceExporter(nc,
+	exp, err := NewSpanExporter(nc,
 		WithExporterSubjectPrefix("jsontrace"),
 		WithExporterEncoding(EncodingJSON),
 	)

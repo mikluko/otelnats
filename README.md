@@ -51,7 +51,7 @@ func main() {
 	defer logProvider.Shutdown(context.Background())
 
 	// Trace exporter
-	traceExp, _ := otelnats.NewTraceExporter(nc)
+	traceExp, _ := otelnats.NewSpanExporter(nc)
 	traceProvider := trace.NewTracerProvider(
 		trace.WithBatcher(traceExp),
 	)
@@ -313,7 +313,7 @@ All exporters implement their respective OTel SDK interfaces:
 | Type             | Implements                                        | Constructor                        |
 |------------------|---------------------------------------------------|------------------------------------|
 | `LogExporter`    | `go.opentelemetry.io/otel/sdk/log.Exporter`       | `NewLogExporter(nc, ...Option)`    |
-| `TraceExporter`  | `go.opentelemetry.io/otel/sdk/trace.SpanExporter` | `NewTraceExporter(nc, ...Option)`  |
+| `SpanExporter`   | `go.opentelemetry.io/otel/sdk/trace.SpanExporter` | `NewSpanExporter(nc, ...Option)`   |
 | `MetricExporter` | `go.opentelemetry.io/otel/sdk/metric.Exporter`    | `NewMetricExporter(nc, ...Option)` |
 
 ### Receiver
