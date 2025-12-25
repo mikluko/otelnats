@@ -448,7 +448,13 @@ func (r *receiverImpl) subscribeJetStream(ctx context.Context, subject string) e
 	consumeCtx, err := consumer.Consume(func(msg jetstream.Msg) {
 		// Spool message into backlog channel
 		// This returns quickly, preventing Consume callback from blocking
-		backlog <- msg
+		select {
+		case backlog <- msg:
+		default:
+			if jsmsg, ok := msg.(interface{ Nak() error }); ok {
+				_ = jsmsg.Nak()
+			}
+		}
 	})
 	if err != nil {
 		return err
