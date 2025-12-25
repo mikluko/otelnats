@@ -2,55 +2,53 @@ package otelnats
 
 import (
 	"context"
-	"sync"
 
 	"github.com/nats-io/nats.go"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
-// TraceExporter exports spans to NATS.
-// It implements [go.opentelemetry.io/otel/sdk/trace.SpanExporter].
-type TraceExporter struct {
-	conn   *nats.Conn
-	config *config
-
-	mu       sync.Mutex
-	shutdown bool
-}
-
 // NewTraceExporter creates a new trace exporter that publishes to NATS.
 //
 // The exporter publishes protobuf-serialized OTLP trace data to the configured
 // subject (default: "otel.traces"). Use [WithExporterSubjectPrefix] to customize.
-func NewTraceExporter(nc *nats.Conn, opts ...ExporterOption) (*TraceExporter, error) {
+func NewTraceExporter(nc *nats.Conn, opts ...ExporterOption) (sdktrace.SpanExporter, error) {
 	if nc == nil {
 		return nil, ErrNilConnection
 	}
-
-	cfg := defaultConfig()
+	cfg := defaultConfig(nc)
 	for _, opt := range opts {
 		opt(cfg)
 	}
+	impl := traceExporterImpl{
+		config:    cfg,
+		marshaler: cfg.marshaler(),
+		publisher: cfg.publisher(),
+		lifecycle: &lifecycle{
+			nc: nc,
+		},
+	}
+	return &impl, nil
+}
 
-	return &TraceExporter{
-		conn:   nc,
-		config: cfg,
-	}, nil
+// traceExporterImpl exports spans to NATS.
+// It implements [go.opentelemetry.io/otel/sdk/trace.SpanExporter].
+type traceExporterImpl struct {
+	marshaler
+	publisher
+	*lifecycle
+	*config
 }
 
 // ExportSpans exports spans to NATS.
 //
 // Spans are converted to OTLP protobuf format and published to the traces subject.
-// The method respects context cancellation and the configured timeout.
-func (e *TraceExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
-	e.mu.Lock()
-	if e.shutdown {
-		e.mu.Unlock()
+// The method respects context cancellation.
+func (e *traceExporterImpl) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+	if len(spans) == 0 {
 		return nil
 	}
-	e.mu.Unlock()
 
-	if len(spans) == 0 {
+	if e.isShutdown() {
 		return nil
 	}
 
@@ -58,7 +56,7 @@ func (e *TraceExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOn
 	tracesData := spansToTracesData(spans)
 
 	// Marshal using configured encoding
-	data, err := e.config.marshal(tracesData)
+	data, err := e.marshal(tracesData)
 	if err != nil {
 		return err
 	}
@@ -70,31 +68,6 @@ func (e *TraceExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOn
 		Header:  e.config.buildHeaders(ctx, SignalTraces),
 	}
 
-	// Publish with appropriate method
-	if e.config.jetstream != nil {
-		return e.publishJetStream(ctx, msg)
-	}
-	return e.publishCore(ctx, msg)
-}
-
-func (e *TraceExporter) publishCore(ctx context.Context, msg *nats.Msg) error {
-	if err := e.conn.PublishMsg(msg); err != nil {
-		return err
-	}
-	return e.conn.FlushTimeout(e.config.timeout)
-}
-
-func (e *TraceExporter) publishJetStream(ctx context.Context, msg *nats.Msg) error {
-	_, err := e.config.jetstream.PublishMsg(ctx, msg)
-	return err
-}
-
-// Shutdown shuts down the exporter.
-//
-// After Shutdown is called, ExportSpans will return immediately without error.
-func (e *TraceExporter) Shutdown(ctx context.Context) error {
-	e.mu.Lock()
-	e.shutdown = true
-	e.mu.Unlock()
-	return nil
+	// Publish message
+	return e.publish(ctx, msg)
 }

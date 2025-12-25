@@ -212,5 +212,5 @@ func createTestSpan(t *testing.T) sdktrace.ReadOnlySpan {
 	return stub.Snapshot()
 }
 
-// Compile-time check that TraceExporter implements sdktrace.SpanExporter
-var _ sdktrace.SpanExporter = (*TraceExporter)(nil)
+// Compile-time check that traceExporterImpl implements sdktrace.SpanExporter
+var _ sdktrace.SpanExporter = (*traceExporterImpl)(nil)

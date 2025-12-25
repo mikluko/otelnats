@@ -2,32 +2,29 @@ package otelnats
 
 import (
 	"context"
-	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"google.golang.org/protobuf/proto"
 )
 
 const (
 	defaultSubjectPrefix = "otel"
-	defaultTimeout       = 5 * time.Second
 )
 
 // config holds shared configuration for exporters and receivers.
 type config struct {
 	subjectPrefix string
 	subjectSuffix string
-	timeout       time.Duration
-	encoding      Encoding
+	conn          *nats.Conn
 	jetstream     jetstream.JetStream
+	encoding      Encoding
 	headers       func(context.Context) nats.Header
 }
 
-func defaultConfig() *config {
+func defaultConfig(nc *nats.Conn) *config {
 	return &config{
+		conn:          nc,
 		subjectPrefix: defaultSubjectPrefix,
-		timeout:       defaultTimeout,
 	}
 }
 
@@ -39,10 +36,24 @@ func (c *config) contentType() string {
 	return ContentType(c.encoding)
 }
 
-func (c *config) marshal(m proto.Message) ([]byte, error) {
-	return Marshal(m, c.encoding)
-}
-
 func (c *config) buildHeaders(ctx context.Context, signal string) nats.Header {
 	return BuildHeaders(ctx, signal, c.encoding, c.headers)
+}
+
+func (c *config) marshaler() marshaler {
+	switch c.encoding {
+	case EncodingJSON:
+		return marshalerJSON{}
+	case EncodingProtobuf:
+		return marshalerProtobuf{}
+	default:
+		panic("unknown encoding")
+	}
+}
+
+func (c *config) publisher() publisher {
+	if c.jetstream != nil {
+		return &publisherJetStream{c.jetstream}
+	}
+	return &publisherCore{c.conn}
 }

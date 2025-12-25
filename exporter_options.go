@@ -2,7 +2,6 @@ package otelnats
 
 import (
 	"context"
-	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -28,16 +27,6 @@ func WithExporterSubjectPrefix(prefix string) ExporterOption {
 func WithExporterSubjectSuffix(suffix string) ExporterOption {
 	return func(c *config) {
 		c.subjectSuffix = suffix
-	}
-}
-
-// WithExporterTimeout sets the timeout for publish operations.
-// The default timeout is 5 seconds.
-// For core NATS, this affects the flush timeout.
-// For JetStream, this is the publish acknowledgment timeout.
-func WithExporterTimeout(d time.Duration) ExporterOption {
-	return func(c *config) {
-		c.timeout = d
 	}
 }
 

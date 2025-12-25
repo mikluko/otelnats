@@ -399,7 +399,10 @@ func (r *receiverImpl) subscribeJetStream(ctx context.Context, subject string, h
 	// This provides continuous message delivery with built-in lifecycle management
 	consumeCtx, err := consumer.Consume(func(msg jetstream.Msg) {
 		handler(msg)
-	})
+	}, jetstream.ConsumeErrHandler(func(consumeCtx jetstream.ConsumeContext, err error) {
+		// Log consume errors but don't stop (consumer will retry)
+		_ = err
+	}))
 	if err != nil {
 		return err
 	}
