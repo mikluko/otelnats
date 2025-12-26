@@ -9,4 +9,5 @@ var (
 	ErrNoHandlers         = errors.New("otelnats: no message handlers configured")
 	ErrNoHandlerForSignal = errors.New("otelnats: no message handler configured for signal")
 	ErrUnknownSignal      = errors.New("otelnats: unknown or missing signal header")
+	ErrBufferOverflow     = errors.New("otelnats: buffer overflow")
 )

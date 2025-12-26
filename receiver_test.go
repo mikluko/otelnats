@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 
@@ -1050,3 +1051,136 @@ func TestReceiver_SignalHeaderErrors(t *testing.T) {
 	})
 }
 
+func TestReceiverWithConsumerObject(t *testing.T) {
+	ns := startEmbeddedNATSWithJetStream(t)
+	nc := connectToNATS(t, ns)
+	js := createJetStream(t, nc)
+	ctx := t.Context()
+
+	// Create stream
+	stream, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:     "WITHCONSUMER",
+		Subjects: OTLPSubjects("wc"),
+	})
+	require.NoError(t, err)
+
+	// Create consumer using native API
+	consumer, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
+		Durable:       "my-consumer",
+		DeliverPolicy: jetstream.DeliverAllPolicy,
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		AckWait:       2 * time.Minute,
+	})
+	require.NoError(t, err)
+
+	// Create exporter
+	exp, err := NewLogExporter(nc,
+		WithExporterSubjectPrefix("wc"),
+		WithExporterJetStream(js),
+	)
+	require.NoError(t, err)
+
+	// Create receiver using WithConsumer (passing consumer directly)
+	received := make(chan *logspb.LogsData, 1)
+
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("wc"),
+		WithReceiverJetStream(js, "WITHCONSUMER"),
+		WithReceiverConsumer(consumer),
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+			data, err := msg.Signal()
+			if err != nil {
+				return err
+			}
+			received <- data
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, recv.Start(ctx))
+	defer recv.Shutdown(ctx)
+
+	// Export a message
+	rec := createTestLogRecord(t)
+	require.NoError(t, exp.Export(ctx, []sdklog.Record{rec}))
+
+	// Verify receipt
+	select {
+	case data := <-received:
+		require.Len(t, data.ResourceLogs, 1)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for message")
+	}
+
+	// Verify consumer settings are preserved
+	consumerCheck, err := stream.Consumer(ctx, "my-consumer")
+	require.NoError(t, err)
+	require.Equal(t, 2*time.Minute, consumerCheck.CachedInfo().Config.AckWait)
+}
+
+func TestMultiTenantWithSuffix(t *testing.T) {
+	ns := startEmbeddedNATSWithJetStream(t)
+	nc := connectToNATS(t, ns)
+	js := createJetStream(t, nc)
+	ctx := t.Context()
+
+	// Create stream with wildcard subjects for multi-tenant
+	_, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:     "MULTI_TENANT",
+		Subjects: OTLPSubjects("mt", ">"), // mt.logs.>, mt.traces.>, mt.metrics.>
+	})
+	require.NoError(t, err)
+
+	// Create exporter for tenant-a
+	expA, err := NewLogExporter(nc,
+		WithExporterSubjectPrefix("mt"),
+		WithExporterSubjectSuffix("tenant-a"),
+		WithExporterJetStream(js),
+	)
+	require.NoError(t, err)
+
+	// Create exporter for tenant-b
+	expB, err := NewLogExporter(nc,
+		WithExporterSubjectPrefix("mt"),
+		WithExporterSubjectSuffix("tenant-b"),
+		WithExporterJetStream(js),
+	)
+	require.NoError(t, err)
+
+	// Create receiver that subscribes to all tenants
+	received := make(chan *logspb.LogsData, 10)
+
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("mt"),
+		WithReceiverSubjectSuffix(">"),
+		WithReceiverJetStream(js, "MULTI_TENANT"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+			data, err := msg.Signal()
+			if err != nil {
+				return err
+			}
+			received <- data
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, recv.Start(ctx))
+	defer recv.Shutdown(ctx)
+
+	// Export from both tenants
+	rec := createTestLogRecord(t)
+	require.NoError(t, expA.Export(ctx, []sdklog.Record{rec}))
+	require.NoError(t, expB.Export(ctx, []sdklog.Record{rec}))
+
+	// Should receive both messages
+	for i := 0; i < 2; i++ {
+		select {
+		case <-received:
+			// OK
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timeout waiting for message %d", i+1)
+		}
+	}
+}

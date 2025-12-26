@@ -7,10 +7,6 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-const (
-	defaultSubjectPrefix = "otel"
-)
-
 // config holds shared configuration for exporters and receivers.
 type config struct {
 	subjectPrefix string
@@ -25,6 +21,8 @@ func defaultConfig(nc *nats.Conn) *config {
 	return &config{
 		conn:          nc,
 		subjectPrefix: defaultSubjectPrefix,
+		subjectSuffix: defaultSubjectSuffix,
+		encoding:      defaultEncoding,
 	}
 }
 

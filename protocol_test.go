@@ -3,9 +3,12 @@ package otelnats
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"google.golang.org/protobuf/proto"
 
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
@@ -256,4 +259,86 @@ func TestBuildHeaders(t *testing.T) {
 		require.Equal(t, SignalTraces, headers.Get(HeaderOtelSignal))
 		require.Len(t, headers, 2)
 	})
+}
+
+func TestOTLPSubjects(t *testing.T) {
+	t.Run("default prefix", func(t *testing.T) {
+		subjects := OTLPSubjects("otel")
+		require.ElementsMatch(t, []string{"otel.logs", "otel.traces", "otel.metrics"}, subjects)
+	})
+
+	t.Run("custom prefix", func(t *testing.T) {
+		subjects := OTLPSubjects("myapp")
+		require.ElementsMatch(t, []string{"myapp.logs", "myapp.traces", "myapp.metrics"}, subjects)
+	})
+
+	t.Run("with suffix", func(t *testing.T) {
+		subjects := OTLPSubjects("otel", ">")
+		require.ElementsMatch(t, []string{"otel.logs.>", "otel.traces.>", "otel.metrics.>"}, subjects)
+	})
+
+	t.Run("with tenant suffix", func(t *testing.T) {
+		subjects := OTLPSubjects("otel", "tenant-a")
+		require.ElementsMatch(t, []string{"otel.logs.tenant-a", "otel.traces.tenant-a", "otel.metrics.tenant-a"}, subjects)
+	})
+}
+
+func TestJetStreamIntegration(t *testing.T) {
+	ns := startEmbeddedNATSWithJetStream(t)
+	nc := connectToNATS(t, ns)
+	js := createJetStream(t, nc)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second*2)
+	defer cancel()
+
+	// Create stream using native jetstream API with OTLPSubjects helper
+	stream, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:     "INTEGRATION_TEST",
+		Subjects: OTLPSubjects("integ"),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "INTEGRATION_TEST", stream.CachedInfo().Config.Name)
+
+	// Create exporter and receiver
+	exp, err := NewLogExporter(nc,
+		WithExporterSubjectPrefix("integ"),
+		WithExporterJetStream(js),
+	)
+	require.NoError(t, err)
+
+	received := make(chan struct{}, 1)
+
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("integ"),
+		WithReceiverJetStream(js, "INTEGRATION_TEST"),
+		WithReceiverConsumerName("test-processor"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+			_, err := msg.Signal()
+			if err != nil {
+				return err
+			}
+			received <- struct{}{}
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, recv.Start(ctx))
+	defer recv.Shutdown(ctx)
+
+	// Export a message
+	rec := createTestLogRecord(t)
+	require.NoError(t, exp.Export(ctx, []sdklog.Record{rec}))
+
+	// Verify receipt
+	select {
+	case <-received:
+		// OK
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for message")
+	}
+
+	// Verify the consumer was created by the receiver
+	consumer, err := stream.Consumer(ctx, "test-processor")
+	require.NoError(t, err)
+	require.Equal(t, "test-processor", consumer.CachedInfo().Config.Durable)
 }
