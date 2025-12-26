@@ -11,36 +11,37 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
 
-func TestNewTraceExporter(t *testing.T) {
+func TestNewSpanExporter(t *testing.T) {
 	t.Run("nil connection returns error", func(t *testing.T) {
-		exp, err := NewTraceExporter(nil)
+		exp, err := NewSpanExporter(nil)
 		require.Error(t, err)
 		require.Nil(t, exp)
-		require.Equal(t, errNilConnection, err)
+		require.Equal(t, ErrNilConnection, err)
 	})
 
 	t.Run("valid connection succeeds", func(t *testing.T) {
 		ns := startEmbeddedNATS(t)
 		nc := connectToNATS(t, ns)
 
-		exp, err := NewTraceExporter(nc)
+		exp, err := NewSpanExporter(nc)
 		require.NoError(t, err)
 		require.NotNil(t, exp)
 	})
 }
 
-func TestTraceExporter_ExportSpans(t *testing.T) {
+func TestSpanExporter_ExportSpans(t *testing.T) {
 	ns := startEmbeddedNATS(t)
 	nc := connectToNATS(t, ns)
 	ctx := t.Context()
 
 	t.Run("empty spans does nothing", func(t *testing.T) {
-		exp, err := NewTraceExporter(nc)
+		exp, err := NewSpanExporter(nc)
 		require.NoError(t, err)
 
 		err = exp.ExportSpans(ctx, nil)
@@ -51,7 +52,7 @@ func TestTraceExporter_ExportSpans(t *testing.T) {
 	})
 
 	t.Run("exports spans with correct subject and headers", func(t *testing.T) {
-		exp, err := NewTraceExporter(nc, WithSubjectPrefix("test"))
+		exp, err := NewSpanExporter(nc, WithExporterSubjectPrefix("test"))
 		require.NoError(t, err)
 
 		// Subscribe to receive the message
@@ -90,12 +91,12 @@ func TestTraceExporter_ExportSpans(t *testing.T) {
 	})
 }
 
-func TestTraceExporter_Shutdown(t *testing.T) {
+func TestSpanExporter_Shutdown(t *testing.T) {
 	ns := startEmbeddedNATS(t)
 	nc := connectToNATS(t, ns)
 	ctx := t.Context()
 
-	exp, err := NewTraceExporter(nc)
+	exp, err := NewSpanExporter(nc)
 	require.NoError(t, err)
 
 	// Shutdown should succeed
@@ -108,12 +109,12 @@ func TestTraceExporter_Shutdown(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestTraceExporter_SpanGrouping(t *testing.T) {
+func TestSpanExporter_SpanGrouping(t *testing.T) {
 	ns := startEmbeddedNATS(t)
 	nc := connectToNATS(t, ns)
 	ctx := t.Context()
 
-	exp, err := NewTraceExporter(nc, WithSubjectPrefix("group"))
+	exp, err := NewSpanExporter(nc, WithExporterSubjectPrefix("group"))
 	require.NoError(t, err)
 
 	sub, err := nc.SubscribeSync("group.traces")
@@ -139,24 +140,31 @@ func TestTraceExporter_SpanGrouping(t *testing.T) {
 	require.Len(t, tracesData.ResourceSpans[0].ScopeSpans[0].Spans, 2)
 }
 
-func TestTraceExporter_Roundtrip(t *testing.T) {
+func TestSpanExporter_Roundtrip(t *testing.T) {
 	ns := startEmbeddedNATS(t)
 	nc := connectToNATS(t, ns)
 	ctx := t.Context()
 
-	// Create exporter and receiver
-	exp, err := NewTraceExporter(nc, WithSubjectPrefix("rt"))
-	require.NoError(t, err)
-
-	recv, err := NewReceiver(nc, WithReceiverSubjectPrefix("rt"))
+	// Create exporter
+	exp, err := NewSpanExporter(nc, WithExporterSubjectPrefix("rt"))
 	require.NoError(t, err)
 
 	// Track received data
 	received := make(chan *tracepb.TracesData, 1)
-	recv.OnTraces(func(ctx context.Context, data *tracepb.TracesData) error {
-		received <- data
-		return nil
-	})
+
+	// Create receiver with handler
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("rt"),
+		WithReceiverTracesHandler(func(ctx context.Context, msg MessageSignal[tracepb.TracesData]) error {
+			data, err := msg.Signal()
+			if err != nil {
+				return err
+			}
+			received <- data
+			return nil
+		}),
+	)
+	require.NoError(t, err)
 
 	require.NoError(t, recv.Start(ctx))
 	defer recv.Shutdown(ctx)
@@ -205,5 +213,42 @@ func createTestSpan(t *testing.T) sdktrace.ReadOnlySpan {
 	return stub.Snapshot()
 }
 
-// Compile-time check that TraceExporter implements sdktrace.SpanExporter
-var _ sdktrace.SpanExporter = (*TraceExporter)(nil)
+// Compile-time check that spanExporterImpl implements sdktrace.SpanExporter
+var _ sdktrace.SpanExporter = (*spanExporterImpl)(nil)
+func TestSpanExporter_JSONEncoding(t *testing.T) {
+	ns := startEmbeddedNATS(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	exp, err := NewSpanExporter(nc,
+		WithExporterSubjectPrefix("jsontrace"),
+		WithExporterEncoding(EncodingJSON),
+	)
+	require.NoError(t, err)
+
+	sub, err := nc.SubscribeSync("jsontrace.traces")
+	require.NoError(t, err)
+	defer sub.Unsubscribe()
+
+	span := createTestSpan(t)
+	err = exp.ExportSpans(ctx, []sdktrace.ReadOnlySpan{span})
+	require.NoError(t, err)
+
+	msg := requireMessage(t, sub, 5*time.Second)
+
+	// Check Content-Type header is JSON
+	require.Equal(t, ContentTypeJSON, msg.Header.Get(HeaderContentType))
+	require.Equal(t, SignalTraces, msg.Header.Get(HeaderOtelSignal))
+
+	// Verify payload is valid JSON (not protobuf)
+	var tracesData tracepb.TracesData
+	err = protojson.Unmarshal(msg.Data, &tracesData)
+	require.NoError(t, err)
+
+	require.Len(t, tracesData.ResourceSpans, 1)
+	require.Len(t, tracesData.ResourceSpans[0].ScopeSpans, 1)
+	require.Len(t, tracesData.ResourceSpans[0].ScopeSpans[0].Spans, 1)
+
+	s := tracesData.ResourceSpans[0].ScopeSpans[0].Spans[0]
+	require.Equal(t, "test-span", s.Name)
+}

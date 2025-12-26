@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/resource"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
@@ -21,7 +22,7 @@ func TestNewMetricExporter(t *testing.T) {
 		exp, err := NewMetricExporter(nil)
 		require.Error(t, err)
 		require.Nil(t, exp)
-		require.Equal(t, errNilConnection, err)
+		require.Equal(t, ErrNilConnection, err)
 	})
 
 	t.Run("valid connection succeeds", func(t *testing.T) {
@@ -48,7 +49,7 @@ func TestMetricExporter_Export(t *testing.T) {
 	})
 
 	t.Run("exports metrics with correct subject and headers", func(t *testing.T) {
-		exp, err := NewMetricExporter(nc, WithSubjectPrefix("test"))
+		exp, err := NewMetricExporter(nc, WithExporterSubjectPrefix("test"))
 		require.NoError(t, err)
 
 		// Subscribe to receive the message
@@ -146,19 +147,26 @@ func TestMetricExporter_Roundtrip(t *testing.T) {
 	nc := connectToNATS(t, ns)
 	ctx := t.Context()
 
-	// Create exporter and receiver
-	exp, err := NewMetricExporter(nc, WithSubjectPrefix("rt"))
-	require.NoError(t, err)
-
-	recv, err := NewReceiver(nc, WithReceiverSubjectPrefix("rt"))
+	// Create exporter
+	exp, err := NewMetricExporter(nc, WithExporterSubjectPrefix("rt"))
 	require.NoError(t, err)
 
 	// Track received data
 	received := make(chan *metricspb.MetricsData, 1)
-	recv.OnMetrics(func(ctx context.Context, data *metricspb.MetricsData) error {
-		received <- data
-		return nil
-	})
+
+	// Create receiver with handler
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("rt"),
+		WithReceiverMetricsHandler(func(ctx context.Context, msg MessageSignal[metricspb.MetricsData]) error {
+			data, err := msg.Signal()
+			if err != nil {
+				return err
+			}
+			received <- data
+			return nil
+		}),
+	)
+	require.NoError(t, err)
 
 	require.NoError(t, recv.Start(ctx))
 	defer recv.Shutdown(ctx)
@@ -220,5 +228,42 @@ func createTestResourceMetrics(t *testing.T) *metricdata.ResourceMetrics {
 	}
 }
 
-// Compile-time check that MetricExporter implements metric.Exporter
-var _ metric.Exporter = (*MetricExporter)(nil)
+// Compile-time check that metricExporterImpl implements metric.Exporter
+var _ metric.Exporter = (*metricExporterImpl)(nil)
+func TestMetricExporter_JSONEncoding(t *testing.T) {
+	ns := startEmbeddedNATS(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	exp, err := NewMetricExporter(nc,
+		WithExporterSubjectPrefix("jsonmetric"),
+		WithExporterEncoding(EncodingJSON),
+	)
+	require.NoError(t, err)
+
+	sub, err := nc.SubscribeSync("jsonmetric.metrics")
+	require.NoError(t, err)
+	defer sub.Unsubscribe()
+
+	rm := createTestResourceMetrics(t)
+	err = exp.Export(ctx, rm)
+	require.NoError(t, err)
+
+	msg := requireMessage(t, sub, 5*time.Second)
+
+	// Check Content-Type header is JSON
+	require.Equal(t, ContentTypeJSON, msg.Header.Get(HeaderContentType))
+	require.Equal(t, SignalMetrics, msg.Header.Get(HeaderOtelSignal))
+
+	// Verify payload is valid JSON (not protobuf)
+	var metricsData metricspb.MetricsData
+	err = protojson.Unmarshal(msg.Data, &metricsData)
+	require.NoError(t, err)
+
+	require.Len(t, metricsData.ResourceMetrics, 1)
+	require.Len(t, metricsData.ResourceMetrics[0].ScopeMetrics, 1)
+	require.Len(t, metricsData.ResourceMetrics[0].ScopeMetrics[0].Metrics, 1)
+
+	m := metricsData.ResourceMetrics[0].ScopeMetrics[0].Metrics[0]
+	require.Equal(t, "test.counter", m.Name)
+}
