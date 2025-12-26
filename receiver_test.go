@@ -1005,7 +1005,7 @@ func TestReceiver_MixedEncoding_AutoDetects(t *testing.T) {
 	}
 }
 
-func TestReceiver_UnknownSignalHeaders(t *testing.T) {
+func TestReceiver_SignalHeaderErrors(t *testing.T) {
 	t.Run("unknown signal header calls error handler", func(t *testing.T) {
 		ns := startEmbeddedNATS(t)
 		nc1 := connectToNATS(t, ns)

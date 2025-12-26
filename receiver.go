@@ -344,7 +344,9 @@ func (r *receiverImpl) subscribe(ctx context.Context) error {
 		return err
 	}
 	r.subs = append(r.subs, sub)
-	return nil
+
+	// Flush to ensure subscription is registered with server
+	return r.conn.Flush()
 }
 
 // getOrCreateBacklog returns the shared backlog channel, creating it on first call.
