@@ -161,35 +161,24 @@ func (r *receiverImpl) setupJetStream(ctx context.Context) error {
 			return err
 		}
 
-		// Queue group: create ephemeral consumer with DeliverGroup
-		// Each receiver instance gets its own consumer for load balancing
-		if r.config.queueGroup != "" {
+		// Try to get existing durable consumer, or create if it doesn't exist
+		// NOTE: We only support pull consumers (via Consume API), not push consumers.
+		// For load balancing across multiple receiver instances, use the same
+		// consumer name (WithReceiverConsumerName) on all instances.
+		consumer, err = stream.Consumer(ctx, r.config.buildConsumerName())
+		if err != nil {
+			if !errors.Is(err, jetstream.ErrConsumerNotFound) {
+				return err
+			}
+			// Consumer doesn't exist, create it
 			consumer, err = stream.CreateConsumer(ctx, jetstream.ConsumerConfig{
+				Durable:        r.config.buildConsumerName(),
 				AckPolicy:      jetstream.AckExplicitPolicy,
 				AckWait:        r.config.ackWait,
 				FilterSubjects: r.config.buildSubjects(),
-				DeliverGroup:   r.config.queueGroup,
 			})
 			if err != nil {
 				return err
-			}
-		} else {
-			// Durable consumer: try to get existing or create new
-			consumer, err = stream.Consumer(ctx, r.config.buildConsumerName())
-			if err != nil {
-				if !errors.Is(err, jetstream.ErrConsumerNotFound) {
-					return err
-				}
-				// Consumer doesn't exist, create it
-				consumer, err = stream.CreateConsumer(ctx, jetstream.ConsumerConfig{
-					Durable:        r.config.buildConsumerName(),
-					AckPolicy:      jetstream.AckExplicitPolicy,
-					AckWait:        r.config.ackWait,
-					FilterSubjects: r.config.buildSubjects(),
-				})
-				if err != nil {
-					return err
-				}
 			}
 		}
 	}

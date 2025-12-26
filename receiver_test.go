@@ -372,79 +372,6 @@ func TestReceiver_JetStream_NakOnError(t *testing.T) {
 	}, 10*time.Second, 100*time.Millisecond)
 }
 
-func TestReceiver_JetStream_QueueGroup(t *testing.T) {
-	ns := startEmbeddedNATSWithJetStream(t)
-	nc1 := connectToNATS(t, ns)
-	nc2 := connectToNATS(t, ns)
-	nc3 := connectToNATS(t, ns)
-	ctx := t.Context()
-
-	js1 := createJetStream(t, nc1)
-	js2 := createJetStream(t, nc2)
-	js3 := createJetStream(t, nc3)
-	streamName := createTestStream(t, js1, "jsqg")
-
-	// Create exporter
-	exp, err := NewLogExporter(nc1, WithExporterSubjectPrefix("jsqg"), WithExporterJetStream(js1))
-	require.NoError(t, err)
-
-	// Create two receivers in same queue group
-	var count1, count2 atomic.Int32
-
-	recv1, err := NewReceiver(nc2,
-		WithReceiverSubjectPrefix("jsqg"),
-		WithReceiverJetStream(js2, streamName),
-		WithReceiverQueueGroup("test-group"),
-		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
-			_, err := msg.Signal()
-			if err != nil {
-				return err
-			}
-			count1.Add(1)
-			return nil
-		}),
-	)
-	require.NoError(t, err)
-
-	recv2, err := NewReceiver(nc3,
-		WithReceiverSubjectPrefix("jsqg"),
-		WithReceiverJetStream(js3, streamName),
-		WithReceiverQueueGroup("test-group"),
-		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
-			_, err := msg.Signal()
-			if err != nil {
-				return err
-			}
-
-			count2.Add(1)
-			return nil
-		}),
-	)
-	require.NoError(t, err)
-
-	require.NoError(t, recv1.Start(ctx))
-	require.NoError(t, recv2.Start(ctx))
-
-	// Send multiple messages
-	const numMessages = 10
-	for i := 0; i < numMessages; i++ {
-		rec := createTestLogRecord(t)
-		require.NoError(t, exp.Export(ctx, []sdklog.Record{rec}))
-	}
-
-	// Wait for all messages to be received
-	require.Eventually(t, func() bool {
-		return count1.Load()+count2.Load() == numMessages
-	}, 5*time.Second, 10*time.Millisecond)
-
-	total := count1.Load() + count2.Load()
-	require.Equal(t, int32(numMessages), total, "each message should be received exactly once")
-	t.Logf("JetStream queue group: recv1=%d, recv2=%d", count1.Load(), count2.Load())
-
-	require.NoError(t, recv1.Shutdown(ctx))
-	require.NoError(t, recv2.Shutdown(ctx))
-}
-
 func TestReceiver_MessageHandler_TypedAccess(t *testing.T) {
 	ns := startEmbeddedNATS(t)
 	nc := connectToNATS(t, ns)
@@ -1122,3 +1049,4 @@ func TestReceiver_SignalHeaderErrors(t *testing.T) {
 		require.NoError(t, recv.Shutdown(ctx))
 	})
 }
+
