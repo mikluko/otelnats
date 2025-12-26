@@ -341,9 +341,11 @@ func (r *receiverImpl) getOrCreateBacklog(ctx context.Context) chan Message {
 	r.msgBacklog = make(chan Message, r.config.backlogSize)
 
 	// Start single worker goroutine to route all messages by header
+	// Use context.Background() instead of Start() context since this goroutine
+	// runs independently and should not be affected by Start() cancellation
 	go func() {
 		for msg := range r.msgBacklog {
-			r.routeMessage(ctx, msg)
+			r.routeMessage(context.Background(), msg)
 		}
 	}()
 
