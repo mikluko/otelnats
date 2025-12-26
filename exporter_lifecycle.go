@@ -22,7 +22,7 @@ func (e *lifecycle) isShutdown() bool {
 	return e.shutdown
 }
 
-// ForceFlush flushes any buffered metric data.
+// ForceFlush flushes any buffered telemetry data.
 func (e *lifecycle) ForceFlush(ctx context.Context) error {
 	e.mu.Lock()
 	if e.shutdown {
