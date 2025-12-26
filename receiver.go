@@ -358,47 +358,63 @@ func (r *receiverImpl) routeMessage(ctx context.Context, msg Message) {
 
 	switch signal {
 	case SignalLogs:
-		msgSignal := MessageSignalFrom[logspb.LogsData](msg)
 		if r.logsMessageHandler == nil {
-			if err := msgSignal.Term(); err != nil {
-				r.errorHandler(err)
-			}
-			r.errorHandler(fmt.Errorf("%w: %s", ErrNoHandlerForSignal, signal))
+			r.handleMissingHandler(msg, signal)
 			return
 		}
+		msgSignal := MessageSignalFrom[logspb.LogsData](msg)
 		r.handleLogs(ctx, msgSignal)
 
 	case SignalTraces:
-		msgSignal := MessageSignalFrom[tracespb.TracesData](msg)
 		if r.tracesMessageHandler == nil {
-			if err := msgSignal.Term(); err != nil {
-				r.errorHandler(err)
-			}
-			r.errorHandler(fmt.Errorf("%w: %s", ErrNoHandlerForSignal, signal))
+			r.handleMissingHandler(msg, signal)
 			return
 		}
+		msgSignal := MessageSignalFrom[tracespb.TracesData](msg)
 		r.handleTraces(ctx, msgSignal)
 
 	case SignalMetrics:
-		msgSignal := MessageSignalFrom[metricspb.MetricsData](msg)
 		if r.metricsMessageHandler == nil {
-			if err := msgSignal.Term(); err != nil {
-				r.errorHandler(err)
-			}
-			r.errorHandler(fmt.Errorf("%w: %s", ErrNoHandlerForSignal, signal))
+			r.handleMissingHandler(msg, signal)
 			return
 		}
+		msgSignal := MessageSignalFrom[metricspb.MetricsData](msg)
 		r.handleMetrics(ctx, msgSignal)
 
 	default:
-		// Unknown or missing signal header - terminate the message
-		// This prevents infinite redelivery of malformed messages
-		if jsmsg, ok := msg.(interface{ Term() error }); ok {
-			if err := jsmsg.Term(); err != nil {
-				r.errorHandler(err)
-			}
-		}
-		// For core NATS, just ignore (no ack/nak needed)
+		// Unknown or missing signal header
+		r.handleUnknownSignal(msg, signal)
+	}
+}
+
+// handleMissingHandler terminates the message and reports the missing handler error.
+// Combines Term() error with ErrNoHandlerForSignal into a single error handler call.
+func (r *receiverImpl) handleMissingHandler(msg Message, signal string) {
+	termErr := msg.Term()
+	handlerErr := fmt.Errorf("%w: %s", ErrNoHandlerForSignal, signal)
+
+	if termErr != nil && !isAlreadyAckedError(termErr) {
+		// Combine both errors
+		r.errorHandler(fmt.Errorf("%w (term failed: %v)", handlerErr, termErr))
+	} else {
+		r.errorHandler(handlerErr)
+	}
+}
+
+// handleUnknownSignal terminates messages with unknown/missing signal headers
+// and reports the error to prevent silent failures.
+func (r *receiverImpl) handleUnknownSignal(msg Message, signal string) {
+	var termErr error
+	if jsmsg, ok := msg.(interface{ Term() error }); ok {
+		termErr = jsmsg.Term()
+	}
+
+	unknownErr := fmt.Errorf("%w: %q", ErrUnknownSignal, signal)
+	if termErr != nil && !isAlreadyAckedError(termErr) {
+		// Combine both errors
+		r.errorHandler(fmt.Errorf("%w (term failed: %v)", unknownErr, termErr))
+	} else {
+		r.errorHandler(unknownErr)
 	}
 }
 

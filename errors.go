@@ -8,4 +8,5 @@ var (
 	ErrUnmarshal          = errors.New("otelnats: failed to unmarshal data")
 	ErrNoHandlers         = errors.New("otelnats: no message handlers configured")
 	ErrNoHandlerForSignal = errors.New("otelnats: no message handler configured for signal")
+	ErrUnknownSignal      = errors.New("otelnats: unknown or missing signal header")
 )
