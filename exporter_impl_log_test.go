@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
@@ -20,7 +21,7 @@ func TestNewLogExporter(t *testing.T) {
 		exp, err := NewLogExporter(nil)
 		require.Error(t, err)
 		require.Nil(t, exp)
-		require.Equal(t, errNilConnection, err)
+		require.Equal(t, ErrNilConnection, err)
 	})
 
 	t.Run("valid connection succeeds", func(t *testing.T) {
@@ -50,7 +51,7 @@ func TestLogExporter_Export(t *testing.T) {
 	})
 
 	t.Run("exports records with correct subject and headers", func(t *testing.T) {
-		exp, err := NewLogExporter(nc, WithSubjectPrefix("test"))
+		exp, err := NewLogExporter(nc, WithExporterSubjectPrefix("test"))
 		require.NoError(t, err)
 
 		// Subscribe to receive the message
@@ -90,8 +91,8 @@ func TestLogExporter_Export(t *testing.T) {
 
 	t.Run("custom headers are included", func(t *testing.T) {
 		exp, err := NewLogExporter(nc,
-			WithSubjectPrefix("headers"),
-			WithHeaders(func(ctx context.Context) nats.Header {
+			WithExporterSubjectPrefix("headers"),
+			WithExporterHeaders(func(ctx context.Context) nats.Header {
 				return nats.Header{"X-Custom": []string{"value"}}
 			}),
 		)
@@ -159,7 +160,7 @@ func TestLogExporter_RecordGrouping(t *testing.T) {
 	nc := connectToNATS(t, ns)
 	ctx := t.Context()
 
-	exp, err := NewLogExporter(nc, WithSubjectPrefix("group"))
+	exp, err := NewLogExporter(nc, WithExporterSubjectPrefix("group"))
 	require.NoError(t, err)
 
 	sub, err := nc.SubscribeSync("group.logs")
@@ -209,5 +210,45 @@ func createTestLogRecord(t *testing.T) sdklog.Record {
 	return rec
 }
 
-// Compile-time check that LogExporter implements sdklog.Exporter
-var _ sdklog.Exporter = (*LogExporter)(nil)
+// Compile-time check that logExporterImpl implements sdklog.Exporter
+var _ sdklog.Exporter = (*logExporterImpl)(nil)
+
+func TestLogExporter_JSONEncoding(t *testing.T) {
+	ns := startEmbeddedNATS(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	t.Run("exports with JSON encoding and correct content-type", func(t *testing.T) {
+		exp, err := NewLogExporter(nc,
+			WithExporterSubjectPrefix("json"),
+			WithExporterEncoding(EncodingJSON),
+		)
+		require.NoError(t, err)
+
+		sub, err := nc.SubscribeSync("json.logs")
+		require.NoError(t, err)
+		defer sub.Unsubscribe()
+
+		rec := createTestLogRecord(t)
+		err = exp.Export(ctx, []sdklog.Record{rec})
+		require.NoError(t, err)
+
+		msg := requireMessage(t, sub, 5*time.Second)
+
+		// Check Content-Type header is JSON
+		require.Equal(t, ContentTypeJSON, msg.Header.Get(HeaderContentType))
+		require.Equal(t, SignalLogs, msg.Header.Get(HeaderOtelSignal))
+
+		// Verify payload is valid JSON (not protobuf)
+		var logsData logspb.LogsData
+		err = protojson.Unmarshal(msg.Data, &logsData)
+		require.NoError(t, err)
+
+		require.Len(t, logsData.ResourceLogs, 1)
+		require.Len(t, logsData.ResourceLogs[0].ScopeLogs, 1)
+		require.Len(t, logsData.ResourceLogs[0].ScopeLogs[0].LogRecords, 1)
+
+		lr := logsData.ResourceLogs[0].ScopeLogs[0].LogRecords[0]
+		require.Equal(t, "test message", lr.Body.GetStringValue())
+	})
+}
