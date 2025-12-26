@@ -17,6 +17,11 @@ type receiverConfig struct {
 	subjectSuffix string
 	queueGroup    string
 
+	// Explicit per-signal subjects (override prefix/suffix when set)
+	logsSubject    string
+	tracesSubject  string
+	metricsSubject string
+
 	// JetStream options
 	jetstream    jetstream.JetStream
 	stream       string
@@ -37,11 +42,26 @@ type receiverConfig struct {
 
 func (c *receiverConfig) buildSubjects() []string {
 	var subjects []string
-	for _, signal := range []string{SignalLogs, SignalMetrics, SignalTraces} {
-		subjects = append(subjects,
-			BuildSubject(c.subjectPrefix, signal, c.subjectSuffix),
-		)
+
+	// Use explicit subjects if set, otherwise build from prefix/suffix
+	if c.logsSubject != "" {
+		subjects = append(subjects, c.logsSubject)
+	} else {
+		subjects = append(subjects, BuildSubject(c.subjectPrefix, SignalLogs, c.subjectSuffix))
 	}
+
+	if c.metricsSubject != "" {
+		subjects = append(subjects, c.metricsSubject)
+	} else {
+		subjects = append(subjects, BuildSubject(c.subjectPrefix, SignalMetrics, c.subjectSuffix))
+	}
+
+	if c.tracesSubject != "" {
+		subjects = append(subjects, c.tracesSubject)
+	} else {
+		subjects = append(subjects, BuildSubject(c.subjectPrefix, SignalTraces, c.subjectSuffix))
+	}
+
 	return subjects
 }
 

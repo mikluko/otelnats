@@ -1184,3 +1184,132 @@ func TestMultiTenantWithSuffix(t *testing.T) {
 		}
 	}
 }
+
+func TestReceiverWithPerSignalSubjects(t *testing.T) {
+	ns := startEmbeddedNATS(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	// Create exporters for different custom subjects
+	expLogs, err := NewLogExporter(nc,
+		WithExporterSubjectPrefix("custom.logs"),
+	)
+	require.NoError(t, err)
+
+	// Track received logs
+	receivedLogs := make(chan *logspb.LogsData, 10)
+
+	// Create receiver with explicit per-signal subjects
+	recv, err := NewReceiver(nc,
+		WithReceiverSignalSubject(SignalLogs, "custom.logs.logs"),
+		WithReceiverSignalSubject(SignalTraces, "custom.traces.traces"),
+		WithReceiverSignalSubject(SignalMetrics, "custom.metrics.metrics"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+			data, err := msg.Signal()
+			if err != nil {
+				return err
+			}
+			receivedLogs <- data
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, recv.Start(ctx))
+	defer recv.Shutdown(ctx)
+
+	// Export a log record
+	rec := createTestLogRecord(t)
+	require.NoError(t, expLogs.Export(ctx, []sdklog.Record{rec}))
+
+	// Should receive the message
+	select {
+	case data := <-receivedLogs:
+		require.Len(t, data.ResourceLogs, 1)
+		lr := data.ResourceLogs[0].ScopeLogs[0].LogRecords[0]
+		require.Equal(t, "test message", lr.Body.GetStringValue())
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for log message")
+	}
+}
+
+func TestReceiverWithMixedSubjectConfiguration(t *testing.T) {
+	ns := startEmbeddedNATS(t)
+	nc1 := connectToNATS(t, ns)
+	nc2 := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	// Create two exporters - one using explicit subject, one using prefix/suffix
+	expCustom, err := NewLogExporter(nc1,
+		WithExporterSubjectPrefix("custom.logs"),
+	)
+	require.NoError(t, err)
+
+	expStandard, err := NewLogExporter(nc1,
+		WithExporterSubjectPrefix("standard"),
+	)
+	require.NoError(t, err)
+
+	// Track received data
+	receivedCustom := make(chan *logspb.LogsData, 10)
+	receivedStandard := make(chan *logspb.LogsData, 10)
+
+	// Create receiver that uses explicit subject for logs only
+	// Other signals would use prefix/suffix (if handlers were configured)
+	recv, err := NewReceiver(nc2,
+		WithReceiverSubjectPrefix("standard"),
+		WithReceiverSignalSubject(SignalLogs, "custom.logs.logs"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+			data, err := msg.Signal()
+			if err != nil {
+				return err
+			}
+			receivedCustom <- data
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+
+	// Create a second receiver that uses standard prefix/suffix
+	recv2, err := NewReceiver(nc2,
+		WithReceiverSubjectPrefix("standard"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+			data, err := msg.Signal()
+			if err != nil {
+				return err
+			}
+			receivedStandard <- data
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, recv.Start(ctx))
+	require.NoError(t, recv2.Start(ctx))
+	defer recv.Shutdown(ctx)
+	defer recv2.Shutdown(ctx)
+
+	// Export to custom subject
+	rec1 := createTestLogRecord(t)
+	require.NoError(t, expCustom.Export(ctx, []sdklog.Record{rec1}))
+
+	// Export to standard subject
+	rec2 := createTestLogRecord(t)
+	require.NoError(t, expStandard.Export(ctx, []sdklog.Record{rec2}))
+
+	// Should receive custom message on recv
+	select {
+	case data := <-receivedCustom:
+		require.Len(t, data.ResourceLogs, 1)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for custom log message")
+	}
+
+	// Should receive standard message on recv2
+	select {
+	case data := <-receivedStandard:
+		require.Len(t, data.ResourceLogs, 1)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for standard log message")
+	}
+}

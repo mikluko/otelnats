@@ -33,6 +33,32 @@ func WithReceiverSubjectSuffix(suffix string) ReceiverOption {
 	}
 }
 
+// WithReceiverSignalSubject sets an explicit subject for a specific signal type.
+// This overrides the prefix/suffix mechanism for that signal, allowing complete
+// control over the subscription subject.
+//
+// The signal parameter must be one of: SignalLogs, SignalMetrics, or SignalTraces.
+//
+// Example:
+//
+//	WithReceiverSignalSubject(otelnats.SignalLogs, "custom.logs.>")
+//	WithReceiverSignalSubject(otelnats.SignalTraces, "traces.prod.*")
+//
+// This is useful when different signals need to be consumed from different
+// subject hierarchies or when migrating between subject naming schemes.
+func WithReceiverSignalSubject(signal, subject string) ReceiverOption {
+	return func(c *receiverConfig) {
+		switch signal {
+		case SignalLogs:
+			c.logsSubject = subject
+		case SignalTraces:
+			c.tracesSubject = subject
+		case SignalMetrics:
+			c.metricsSubject = subject
+		}
+	}
+}
+
 // WithReceiverQueueGroup sets the queue group for load-balanced Core NATS consumption.
 // When multiple receivers use the same queue group, each message is
 // delivered to only one receiver in the group.
