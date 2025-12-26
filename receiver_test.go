@@ -3,10 +3,12 @@ package otelnats
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 
@@ -894,6 +896,228 @@ func TestReceiver_BacklogSize(t *testing.T) {
 		require.Eventually(t, func() bool {
 			return receivedCount.Load() == int32(messageCount)
 		}, 5*time.Second, 10*time.Millisecond)
+
+		require.NoError(t, recv.Shutdown(ctx))
+	})
+}
+
+func TestReceiver_JSONEncoding_Roundtrip(t *testing.T) {
+	ns := startEmbeddedNATS(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	// Create exporter with JSON encoding
+	exp, err := NewLogExporter(nc,
+		WithExporterSubjectPrefix("jsonrt"),
+		WithExporterEncoding(EncodingJSON),
+	)
+	require.NoError(t, err)
+
+	// Create receiver (auto-detects encoding from Content-Type)
+	received := make(chan *logspb.LogsData, 1)
+
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("jsonrt"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+			data, err := msg.Signal()
+			if err != nil {
+				return err
+			}
+			received <- data
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, recv.Start(ctx))
+	defer recv.Shutdown(ctx)
+
+	// Export a JSON-encoded message
+	rec := createTestLogRecord(t)
+	require.NoError(t, exp.Export(ctx, []sdklog.Record{rec}))
+
+	// Verify receipt and correct decoding
+	select {
+	case data := <-received:
+		require.Len(t, data.ResourceLogs, 1)
+		require.Len(t, data.ResourceLogs[0].ScopeLogs, 1)
+		require.Len(t, data.ResourceLogs[0].ScopeLogs[0].LogRecords, 1)
+
+		lr := data.ResourceLogs[0].ScopeLogs[0].LogRecords[0]
+		require.Equal(t, "test message", lr.Body.GetStringValue())
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for message")
+	}
+}
+
+func TestReceiver_MixedEncoding_AutoDetects(t *testing.T) {
+	ns := startEmbeddedNATS(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	// Create two exporters: one protobuf, one JSON
+	expProto, err := NewLogExporter(nc,
+		WithExporterSubjectPrefix("mixed"),
+		WithExporterEncoding(EncodingProtobuf),
+	)
+	require.NoError(t, err)
+
+	expJSON, err := NewLogExporter(nc,
+		WithExporterSubjectPrefix("mixed"),
+		WithExporterEncoding(EncodingJSON),
+	)
+	require.NoError(t, err)
+
+	// Create receiver (should handle both)
+	received := make(chan *logspb.LogsData, 10)
+
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("mixed"),
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+			data, err := msg.Signal()
+			if err != nil {
+				return err
+			}
+			received <- data
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, recv.Start(ctx))
+	defer recv.Shutdown(ctx)
+
+	// Export both protobuf and JSON messages
+	rec := createTestLogRecord(t)
+	require.NoError(t, expProto.Export(ctx, []sdklog.Record{rec}))
+	require.NoError(t, expJSON.Export(ctx, []sdklog.Record{rec}))
+
+	// Should receive both messages
+	for i := 0; i < 2; i++ {
+		select {
+		case data := <-received:
+			require.Len(t, data.ResourceLogs, 1)
+			lr := data.ResourceLogs[0].ScopeLogs[0].LogRecords[0]
+			require.Equal(t, "test message", lr.Body.GetStringValue())
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timeout waiting for message %d", i+1)
+		}
+	}
+}
+
+func TestReceiver_UnknownSignalHeaders(t *testing.T) {
+	t.Run("unknown signal header calls error handler", func(t *testing.T) {
+		ns := startEmbeddedNATS(t)
+		nc1 := connectToNATS(t, ns)
+		nc2 := connectToNATS(t, ns)
+		ctx := t.Context()
+
+		// Track errors
+		var capturedErrors []error
+		var errorsMu sync.Mutex
+
+		recv, err := NewReceiver(nc2,
+			WithReceiverSubjectPrefix("unknown"),
+			WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+				_, err := msg.Signal()
+				return err
+			}),
+			WithReceiverErrorHandler(func(err error) {
+				errorsMu.Lock()
+				defer errorsMu.Unlock()
+				capturedErrors = append(capturedErrors, err)
+			}),
+		)
+		require.NoError(t, err)
+
+		require.NoError(t, recv.Start(ctx))
+
+		// Publish a message with an unknown signal header directly via NATS
+		logsData := &logspb.LogsData{}
+		data, err := Marshal(logsData, EncodingProtobuf)
+		require.NoError(t, err)
+
+		msg := &nats.Msg{
+			Subject: BuildSubject("unknown", "logs", ""),
+			Data:    data,
+			Header: nats.Header{
+				HeaderContentType: []string{ContentTypeProtobuf},
+				HeaderOtelSignal:  []string{"unknown-signal"}, // Invalid signal
+			},
+		}
+
+		require.NoError(t, nc1.PublishMsg(msg))
+		require.NoError(t, nc1.Flush())
+
+		// Wait for error to be captured
+		require.Eventually(t, func() bool {
+			errorsMu.Lock()
+			defer errorsMu.Unlock()
+			return len(capturedErrors) > 0
+		}, 5*time.Second, 10*time.Millisecond)
+
+		// Verify the error is ErrUnknownSignal
+		errorsMu.Lock()
+		require.True(t, errors.Is(capturedErrors[0], ErrUnknownSignal))
+		errorsMu.Unlock()
+
+		require.NoError(t, recv.Shutdown(ctx))
+	})
+
+	t.Run("missing signal header calls error handler", func(t *testing.T) {
+		ns := startEmbeddedNATS(t)
+		nc1 := connectToNATS(t, ns)
+		nc2 := connectToNATS(t, ns)
+		ctx := t.Context()
+
+		// Track errors
+		var capturedErrors []error
+		var errorsMu sync.Mutex
+
+		recv, err := NewReceiver(nc2,
+			WithReceiverSubjectPrefix("missing"),
+			WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+				_, err := msg.Signal()
+				return err
+			}),
+			WithReceiverErrorHandler(func(err error) {
+				errorsMu.Lock()
+				defer errorsMu.Unlock()
+				capturedErrors = append(capturedErrors, err)
+			}),
+		)
+		require.NoError(t, err)
+
+		require.NoError(t, recv.Start(ctx))
+
+		// Publish a message WITHOUT signal header
+		logsData := &logspb.LogsData{}
+		data, err := Marshal(logsData, EncodingProtobuf)
+		require.NoError(t, err)
+
+		msg := &nats.Msg{
+			Subject: BuildSubject("missing", "logs", ""),
+			Data:    data,
+			Header: nats.Header{
+				HeaderContentType: []string{ContentTypeProtobuf},
+				// HeaderOtelSignal is missing
+			},
+		}
+
+		require.NoError(t, nc1.PublishMsg(msg))
+		require.NoError(t, nc1.Flush())
+
+		// Wait for error to be captured
+		require.Eventually(t, func() bool {
+			errorsMu.Lock()
+			defer errorsMu.Unlock()
+			return len(capturedErrors) > 0
+		}, 5*time.Second, 10*time.Millisecond)
+
+		// Verify the error is ErrUnknownSignal
+		errorsMu.Lock()
+		require.True(t, errors.Is(capturedErrors[0], ErrUnknownSignal))
+		errorsMu.Unlock()
 
 		require.NoError(t, recv.Shutdown(ctx))
 	})

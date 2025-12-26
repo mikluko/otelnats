@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
@@ -211,3 +212,43 @@ func createTestLogRecord(t *testing.T) sdklog.Record {
 
 // Compile-time check that logExporterImpl implements sdklog.Exporter
 var _ sdklog.Exporter = (*logExporterImpl)(nil)
+
+func TestLogExporter_JSONEncoding(t *testing.T) {
+	ns := startEmbeddedNATS(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	t.Run("exports with JSON encoding and correct content-type", func(t *testing.T) {
+		exp, err := NewLogExporter(nc,
+			WithExporterSubjectPrefix("json"),
+			WithExporterEncoding(EncodingJSON),
+		)
+		require.NoError(t, err)
+
+		sub, err := nc.SubscribeSync("json.logs")
+		require.NoError(t, err)
+		defer sub.Unsubscribe()
+
+		rec := createTestLogRecord(t)
+		err = exp.Export(ctx, []sdklog.Record{rec})
+		require.NoError(t, err)
+
+		msg := requireMessage(t, sub, 5*time.Second)
+
+		// Check Content-Type header is JSON
+		require.Equal(t, ContentTypeJSON, msg.Header.Get(HeaderContentType))
+		require.Equal(t, SignalLogs, msg.Header.Get(HeaderOtelSignal))
+
+		// Verify payload is valid JSON (not protobuf)
+		var logsData logspb.LogsData
+		err = protojson.Unmarshal(msg.Data, &logsData)
+		require.NoError(t, err)
+
+		require.Len(t, logsData.ResourceLogs, 1)
+		require.Len(t, logsData.ResourceLogs[0].ScopeLogs, 1)
+		require.Len(t, logsData.ResourceLogs[0].ScopeLogs[0].LogRecords, 1)
+
+		lr := logsData.ResourceLogs[0].ScopeLogs[0].LogRecords[0]
+		require.Equal(t, "test message", lr.Body.GetStringValue())
+	})
+}

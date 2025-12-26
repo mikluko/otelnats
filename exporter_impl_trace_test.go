@@ -11,6 +11,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
@@ -214,3 +215,40 @@ func createTestSpan(t *testing.T) sdktrace.ReadOnlySpan {
 
 // Compile-time check that spanExporterImpl implements sdktrace.SpanExporter
 var _ sdktrace.SpanExporter = (*spanExporterImpl)(nil)
+func TestSpanExporter_JSONEncoding(t *testing.T) {
+	ns := startEmbeddedNATS(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	exp, err := NewSpanExporter(nc,
+		WithExporterSubjectPrefix("jsontrace"),
+		WithExporterEncoding(EncodingJSON),
+	)
+	require.NoError(t, err)
+
+	sub, err := nc.SubscribeSync("jsontrace.traces")
+	require.NoError(t, err)
+	defer sub.Unsubscribe()
+
+	span := createTestSpan(t)
+	err = exp.ExportSpans(ctx, []sdktrace.ReadOnlySpan{span})
+	require.NoError(t, err)
+
+	msg := requireMessage(t, sub, 5*time.Second)
+
+	// Check Content-Type header is JSON
+	require.Equal(t, ContentTypeJSON, msg.Header.Get(HeaderContentType))
+	require.Equal(t, SignalTraces, msg.Header.Get(HeaderOtelSignal))
+
+	// Verify payload is valid JSON (not protobuf)
+	var tracesData tracepb.TracesData
+	err = protojson.Unmarshal(msg.Data, &tracesData)
+	require.NoError(t, err)
+
+	require.Len(t, tracesData.ResourceSpans, 1)
+	require.Len(t, tracesData.ResourceSpans[0].ScopeSpans, 1)
+	require.Len(t, tracesData.ResourceSpans[0].ScopeSpans[0].Spans, 1)
+
+	s := tracesData.ResourceSpans[0].ScopeSpans[0].Spans[0]
+	require.Equal(t, "test-span", s.Name)
+}

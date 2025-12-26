@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/resource"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
@@ -229,3 +230,40 @@ func createTestResourceMetrics(t *testing.T) *metricdata.ResourceMetrics {
 
 // Compile-time check that metricExporterImpl implements metric.Exporter
 var _ metric.Exporter = (*metricExporterImpl)(nil)
+func TestMetricExporter_JSONEncoding(t *testing.T) {
+	ns := startEmbeddedNATS(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	exp, err := NewMetricExporter(nc,
+		WithExporterSubjectPrefix("jsonmetric"),
+		WithExporterEncoding(EncodingJSON),
+	)
+	require.NoError(t, err)
+
+	sub, err := nc.SubscribeSync("jsonmetric.metrics")
+	require.NoError(t, err)
+	defer sub.Unsubscribe()
+
+	rm := createTestResourceMetrics(t)
+	err = exp.Export(ctx, rm)
+	require.NoError(t, err)
+
+	msg := requireMessage(t, sub, 5*time.Second)
+
+	// Check Content-Type header is JSON
+	require.Equal(t, ContentTypeJSON, msg.Header.Get(HeaderContentType))
+	require.Equal(t, SignalMetrics, msg.Header.Get(HeaderOtelSignal))
+
+	// Verify payload is valid JSON (not protobuf)
+	var metricsData metricspb.MetricsData
+	err = protojson.Unmarshal(msg.Data, &metricsData)
+	require.NoError(t, err)
+
+	require.Len(t, metricsData.ResourceMetrics, 1)
+	require.Len(t, metricsData.ResourceMetrics[0].ScopeMetrics, 1)
+	require.Len(t, metricsData.ResourceMetrics[0].ScopeMetrics[0].Metrics, 1)
+
+	m := metricsData.ResourceMetrics[0].ScopeMetrics[0].Metrics[0]
+	require.Equal(t, "test.counter", m.Name)
+}
