@@ -96,6 +96,9 @@ type receiverConfig struct {
 	ackWait      time.Duration
 	backlogSize  int
 
+	// Base context for message handlers
+	baseContext context.Context
+
 	// handlers
 	logsHandler    MessageHandler[logspb.LogsData]
 	tracesHandler  MessageHandler[tracespb.TracesData]
@@ -202,6 +205,21 @@ func WithReceiverAckWait(d time.Duration) ReceiverOption {
 func WithReceiverBacklogSize(size int) ReceiverOption {
 	return func(c *receiverConfig) {
 		c.backlogSize = size
+	}
+}
+
+// WithReceiverBaseContext sets the base context for message handler invocations.
+// This context is passed to all message handlers and allows propagating values
+// (e.g., trace context, tenant IDs) or implementing custom cancellation strategies.
+// If not set, defaults to context.Background().
+//
+// Example:
+//
+//	ctx := context.WithValue(context.Background(), "tenant", "acme")
+//	otelnats.NewReceiver(nc, otelnats.WithReceiverBaseContext(ctx))
+func WithReceiverBaseContext(ctx context.Context) ReceiverOption {
+	return func(c *receiverConfig) {
+		c.baseContext = ctx
 	}
 }
 
@@ -331,7 +349,7 @@ func (r *receiverImpl) subscribe(ctx context.Context) error {
 
 // getOrCreateBacklog returns the shared backlog channel, creating it on first call.
 // All subscriptions (core NATS and JetStream) share a single backlog for message buffering.
-func (r *receiverImpl) getOrCreateBacklog(ctx context.Context) chan Message {
+func (r *receiverImpl) getOrCreateBacklog(_ context.Context) chan Message {
 	// Return existing backlog if already created
 	if r.msgBacklog != nil {
 		return r.msgBacklog
@@ -340,12 +358,18 @@ func (r *receiverImpl) getOrCreateBacklog(ctx context.Context) chan Message {
 	// Create shared backlog channel
 	r.msgBacklog = make(chan Message, r.config.backlogSize)
 
+	// Determine base context for message handlers
+	// Use configured base context, or default to Background() if not set
+	baseCtx := r.config.baseContext
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+
 	// Start single worker goroutine to route all messages by header
-	// Use context.Background() instead of Start() context since this goroutine
-	// runs independently and should not be affected by Start() cancellation
+	// Uses base context independent of Start() to avoid premature cancellation
 	go func() {
 		for msg := range r.msgBacklog {
-			r.routeMessage(context.Background(), msg)
+			r.routeMessage(baseCtx, msg)
 		}
 	}()
 
