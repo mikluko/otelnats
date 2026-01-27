@@ -64,8 +64,8 @@ type receiverImpl struct {
 	// Single shared message backlog for buffering all incoming messages
 	buffer chan Message
 
-	// In-flight message tracking
-	wg sync.WaitGroup
+	// Closed when the worker goroutine exits after draining the buffer
+	workerDone chan struct{}
 }
 
 // Start begins receiving messages from NATS.
@@ -107,10 +107,18 @@ func (r *receiverImpl) setup(ctx context.Context) error {
 		baseCtx = context.Background()
 	}
 
-	// Start worker goroutine to route all messages by header
-	// Uses base context independent of Start() to avoid premature cancellation
+	// Start worker goroutine to route all messages by header.
+	// Uses base context independent of Start() to avoid premature cancellation.
+	// workerDone is closed when the goroutine exits after the buffer channel is
+	// closed and all remaining messages have been processed.
+	//
+	// buf is captured locally to avoid a data race with Shutdown setting
+	// r.buffer = nil while the goroutine evaluates the range expression.
+	buf := r.buffer
+	r.workerDone = make(chan struct{})
 	go func() {
-		for msg := range r.buffer {
+		defer close(r.workerDone)
+		for msg := range buf {
 			r.routeMessage(baseCtx, msg)
 		}
 	}()
@@ -122,12 +130,13 @@ func (r *receiverImpl) setup(ctx context.Context) error {
 }
 
 func (r *receiverImpl) setupCore(_ context.Context) error {
+	buf := r.buffer // capture locally to avoid data race with Shutdown setting r.buffer = nil
 	natsMsgHandler := func(msg *nats.Msg) {
 		// Spool message into buffer
 		select {
-		case r.buffer <- &messageCoreWrapper{msg: msg}:
+		case buf <- &messageCoreWrapper{msg: msg}:
 		default:
-			r.errorHandler(fmt.Errorf("%w: size=%d", ErrBufferOverflow, len(r.buffer)))
+			r.errorHandler(fmt.Errorf("%w: size=%d", ErrBufferOverflow, len(buf)))
 		}
 	}
 
@@ -185,11 +194,12 @@ func (r *receiverImpl) setupJetStream(ctx context.Context) error {
 
 	// Start consuming messages using the Consume API
 	// Messages are spooled into backlog channel for async processing
+	buf := r.buffer // capture locally to avoid data race with Shutdown setting r.buffer = nil
 	consumeCtx, err := consumer.Consume(func(msg jetstream.Msg) {
 		// Spool message into backlog channel
 		// This returns quickly, preventing Consume callback from blocking
 		select {
-		case r.buffer <- msg:
+		case buf <- msg:
 		default:
 			if err := msg.Nak(); err != nil {
 				r.errorHandler(err)
@@ -274,9 +284,6 @@ func (r *receiverImpl) handleUnknownSignal(msg Message, signal string) {
 }
 
 func (r *receiverImpl) handleLogs(ctx context.Context, msg MessageSignal[logspb.LogsData]) {
-	r.wg.Add(1)
-	defer r.wg.Done()
-
 	err := r.logsMessageHandler(ctx, msg)
 	if err != nil {
 		r.errorHandler(err)
@@ -285,9 +292,6 @@ func (r *receiverImpl) handleLogs(ctx context.Context, msg MessageSignal[logspb.
 }
 
 func (r *receiverImpl) handleTraces(ctx context.Context, msg MessageSignal[tracespb.TracesData]) {
-	r.wg.Add(1)
-	defer r.wg.Done()
-
 	err := r.tracesMessageHandler(ctx, msg)
 	if err != nil {
 		r.errorHandler(err)
@@ -296,9 +300,6 @@ func (r *receiverImpl) handleTraces(ctx context.Context, msg MessageSignal[trace
 }
 
 func (r *receiverImpl) handleMetrics(ctx context.Context, msg MessageSignal[metricspb.MetricsData]) {
-	r.wg.Add(1)
-	defer r.wg.Done()
-
 	err := r.metricsMessageHandler(ctx, msg)
 	if err != nil {
 		r.errorHandler(err)
@@ -353,27 +354,28 @@ func (r *receiverImpl) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	// Drain JetStream consume contexts to stop message delivery gracefully
+	// Drain JetStream consume contexts to stop message delivery gracefully.
+	// After Drain returns, no more messages will be written to the buffer.
 	for _, cc := range consumeContexts {
 		cc.Drain()
 	}
 
-	// Wait for in-flight messages with context timeout
-	done := make(chan struct{})
-	go func() {
-		r.wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-
-	// Close shared backlog channel to allow worker goroutine to exit
+	// Close the buffer channel so the worker goroutine drains remaining
+	// messages and exits. This must happen after Drain to avoid sending
+	// on a closed channel in the consume callback.
 	if msgBacklog != nil {
 		close(msgBacklog)
+	}
+
+	// Wait for the worker goroutine to finish processing all buffered
+	// messages. Since all handlers run synchronously in the worker,
+	// workerDone closing guarantees all messages have been fully processed.
+	if r.workerDone != nil {
+		select {
+		case <-r.workerDone:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 
 	return nil
