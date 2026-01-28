@@ -30,6 +30,11 @@ type receiverConfig struct {
 	ackWait      time.Duration
 	backlogSize  int
 
+	// Rate limiting options (JetStream only)
+	rateLimit     float64 // messages per second (0 = disabled)
+	rateBurst     int     // token bucket capacity
+	rateBatchSize int     // messages per Fetch() call (defaults to rateBurst)
+
 	// Base context for message handlers
 	baseContext context.Context
 

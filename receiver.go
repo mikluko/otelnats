@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracespb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"golang.org/x/time/rate"
 )
 
 type Receiver interface {
@@ -58,14 +60,13 @@ type receiverImpl struct {
 	// Core NATS subscriptions
 	subs []*nats.Subscription
 
-	// JetStream consumers and their contexts
-	consumeContexts []jetstream.ConsumeContext
-
-	// Single shared message backlog for buffering all incoming messages
-	buffer chan Message
-
-	// Closed when the worker goroutine exits after draining the buffer
+	// Core NATS: message buffer and worker goroutine
+	buffer     chan Message
 	workerDone chan struct{}
+
+	// JetStream: fetch goroutine control
+	fetchCancel context.CancelFunc
+	fetchDone   chan struct{}
 }
 
 // Start begins receiving messages from NATS.
@@ -86,6 +87,23 @@ func (r *receiverImpl) Start(ctx context.Context) error {
 		return ErrNoHandlers
 	}
 
+	// Validate rate limiting configuration
+	if r.config.rateLimit > 0 {
+		if r.config.jetstream == nil {
+			return errors.New("rate limiting requires JetStream (use WithReceiverJetStream)")
+		}
+		if r.config.rateBurst <= 0 {
+			return errors.New("rate burst must be > 0")
+		}
+		// Default batchSize to burst if not explicitly set
+		if r.config.rateBatchSize == 0 {
+			r.config.rateBatchSize = r.config.rateBurst
+		}
+		if r.config.rateBurst < r.config.rateBatchSize {
+			return errors.New("rate burst must be >= batch size")
+		}
+	}
+
 	// Create a single subscription with broad subject pattern
 	// Messages are routed internally based on Otel-Signal header
 	if err := r.setup(ctx); err != nil {
@@ -97,35 +115,32 @@ func (r *receiverImpl) Start(ctx context.Context) error {
 }
 
 func (r *receiverImpl) setup(ctx context.Context) error {
-	// Create shared backlog channel
+	// JetStream uses Fetch API - no buffer needed
+	if r.config.jetstream != nil {
+		return r.setupJetStream(ctx)
+	}
+
+	// Core NATS: create buffer channel and worker goroutine
 	r.buffer = make(chan Message, r.config.backlogSize)
 
 	// Determine base context for message handlers
-	// Use configured base context, or default to Background() if not set
 	baseCtx := r.config.baseContext
 	if baseCtx == nil {
 		baseCtx = context.Background()
 	}
 
 	// Start worker goroutine to route all messages by header.
-	// Uses base context independent of Start() to avoid premature cancellation.
-	// workerDone is closed when the goroutine exits after the buffer channel is
-	// closed and all remaining messages have been processed.
-	//
-	// buf is captured locally to avoid a data race with Shutdown setting
-	// r.buffer = nil while the goroutine evaluates the range expression.
+	// buf and workerDone are captured locally to avoid data races with Shutdown.
 	buf := r.buffer
 	r.workerDone = make(chan struct{})
+	workerDone := r.workerDone
 	go func() {
-		defer close(r.workerDone)
+		defer close(workerDone)
 		for msg := range buf {
 			r.routeMessage(baseCtx, msg)
 		}
 	}()
 
-	if r.config.jetstream != nil {
-		return r.setupJetStream(ctx)
-	}
 	return r.setupCore(ctx)
 }
 
@@ -171,7 +186,7 @@ func (r *receiverImpl) setupJetStream(ctx context.Context) error {
 		}
 
 		// Try to get existing durable consumer, or create if it doesn't exist
-		// NOTE: We only support pull consumers (via Consume API), not push consumers.
+		// NOTE: We only support pull consumers (via Consume/Fetch API), not push consumers.
 		// For load balancing across multiple receiver instances, use the same
 		// consumer name (WithReceiverConsumerName) on all instances.
 		consumer, err = stream.Consumer(ctx, r.config.buildConsumerName())
@@ -192,27 +207,110 @@ func (r *receiverImpl) setupJetStream(ctx context.Context) error {
 		}
 	}
 
-	// Start consuming messages using the Consume API
-	// Messages are spooled into backlog channel for async processing
-	buf := r.buffer // capture locally to avoid data race with Shutdown setting r.buffer = nil
-	consumeCtx, err := consumer.Consume(func(msg jetstream.Msg) {
-		// Spool message into backlog channel
-		// This returns quickly, preventing Consume callback from blocking
-		select {
-		case buf <- msg:
-		default:
-			if err := msg.Nak(); err != nil {
-				r.errorHandler(err)
-			}
-		}
-	})
-	if err != nil {
-		return err
+	return r.setupJetStreamFetch(consumer)
+}
+
+// setupJetStreamFetch sets up pull-based consumption using the Fetch API.
+// When rate limiting is enabled, tokens are acquired before each fetch.
+// Messages are processed directly without buffering.
+func (r *receiverImpl) setupJetStreamFetch(consumer jetstream.Consumer) error {
+	// Create rate limiter only if rate limiting is enabled
+	var limiter *rate.Limiter
+	if r.config.rateLimit > 0 {
+		limiter = rate.NewLimiter(rate.Limit(r.config.rateLimit), r.config.rateBurst)
 	}
 
-	r.consumeContexts = append(r.consumeContexts, consumeCtx)
+	baseCtx := r.config.baseContext
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+
+	var fetchCtx context.Context
+	fetchCtx, r.fetchCancel = context.WithCancel(context.Background())
+	r.fetchDone = make(chan struct{})
+
+	batchSize := r.config.rateBatchSize
+	if batchSize == 0 {
+		batchSize = defaultFetchBatchSize
+	}
+	fetchTimeout := r.calculateFetchTimeout(batchSize)
+
+	go func() {
+		defer close(r.fetchDone)
+		for {
+			// Acquire tokens BEFORE fetching (only if rate limiting enabled)
+			if limiter != nil {
+				if err := limiter.WaitN(fetchCtx, batchSize); err != nil {
+					return // context cancelled
+				}
+			}
+
+			batch, err := consumer.Fetch(batchSize, jetstream.FetchMaxWait(fetchTimeout))
+			if err != nil {
+				select {
+				case <-fetchCtx.Done():
+					return
+				default:
+					// ErrNoMessages is normal when no messages available - not an error
+					if !errors.Is(err, jetstream.ErrNoMessages) {
+						r.errorHandler(err)
+						time.Sleep(fetchRetryDelay)
+					}
+					continue
+				}
+			}
+
+			// Process messages - check for shutdown while waiting
+			msgs := batch.Messages()
+		msgLoop:
+			for {
+				select {
+				case <-fetchCtx.Done():
+					// Drain and NAK any remaining messages
+					for msg := range msgs {
+						if err := msg.Nak(); err != nil {
+							r.errorHandler(err)
+						}
+					}
+					return
+				case msg, ok := <-msgs:
+					if !ok {
+						break msgLoop // batch complete
+					}
+					r.routeMessage(baseCtx, msg)
+				}
+			}
+		}
+	}()
 
 	return nil
+}
+
+// calculateFetchTimeout calculates the timeout for Fetch() calls.
+// When rate limiting is enabled, allows enough time to consume the batch at the configured rate.
+// Always capped at ackWait to prevent messages from timing out.
+func (r *receiverImpl) calculateFetchTimeout(batchSize int) time.Duration {
+	var timeout time.Duration
+
+	if r.config.rateLimit > 0 {
+		// Time to consume batch at configured rate, plus buffer for network latency
+		timeout = time.Duration(float64(batchSize)/r.config.rateLimit*float64(time.Second)) + minFetchTimeout
+	} else {
+		// No rate limit - use default fetch timeout for responsive shutdown
+		timeout = defaultFetchTimeout
+	}
+
+	// Cap at ackWait to prevent messages from timing out
+	if timeout > r.config.ackWait {
+		timeout = r.config.ackWait
+	}
+
+	// Ensure minimum timeout for network operations
+	if timeout < minFetchTimeout {
+		timeout = minFetchTimeout
+	}
+
+	return timeout
 }
 
 // routeMessage routes a message to the appropriate handler based on the Otel-Signal header.
@@ -341,10 +439,14 @@ func (r *receiverImpl) Shutdown(ctx context.Context) error {
 	r.shutdown = true
 	subs := r.subs
 	r.subs = nil
-	consumeContexts := r.consumeContexts
-	r.consumeContexts = nil
 	msgBacklog := r.buffer
 	r.buffer = nil
+	workerDone := r.workerDone
+	r.workerDone = nil
+	fetchCancel := r.fetchCancel
+	r.fetchCancel = nil
+	fetchDone := r.fetchDone
+	r.fetchDone = nil
 	r.mu.Unlock()
 
 	// Unsubscribe core NATS subscriptions
@@ -354,10 +456,18 @@ func (r *receiverImpl) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	// Drain JetStream consume contexts to stop message delivery gracefully.
-	// After Drain returns, no more messages will be written to the buffer.
-	for _, cc := range consumeContexts {
-		cc.Drain()
+	// Stop JetStream fetch goroutine
+	if fetchCancel != nil {
+		fetchCancel()
+	}
+
+	// Wait for fetch goroutine to exit
+	if fetchDone != nil {
+		select {
+		case <-fetchDone:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 
 	// Close the buffer channel so the worker goroutine drains remaining
@@ -370,9 +480,9 @@ func (r *receiverImpl) Shutdown(ctx context.Context) error {
 	// Wait for the worker goroutine to finish processing all buffered
 	// messages. Since all handlers run synchronously in the worker,
 	// workerDone closing guarantees all messages have been fully processed.
-	if r.workerDone != nil {
+	if workerDone != nil {
 		select {
-		case <-r.workerDone:
+		case <-workerDone:
 		case <-ctx.Done():
 			return ctx.Err()
 		}

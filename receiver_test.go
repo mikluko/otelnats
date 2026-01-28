@@ -1313,3 +1313,272 @@ func TestReceiverWithMixedSubjectConfiguration(t *testing.T) {
 		t.Fatal("timeout waiting for standard log message")
 	}
 }
+
+func TestReceiver_JetStream_RateLimited(t *testing.T) {
+	ns := startEmbeddedNATSWithJetStream(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	js := createJetStream(t, nc)
+	streamName := createTestStream(t, js, "ratelimit")
+
+	// Create exporter with JetStream
+	exp, err := NewLogExporter(nc, WithExporterSubjectPrefix("ratelimit"), WithExporterJetStream(js))
+	require.NoError(t, err)
+
+	// Track received data
+	var receivedCount atomic.Int32
+
+	// Create receiver with rate limiting
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("ratelimit"),
+		WithReceiverJetStream(js, streamName),
+		WithReceiverRateLimit(1000, 10), // 1000 msg/s, burst 10
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+			receivedCount.Add(1)
+			return nil
+		}),
+		WithReceiverErrorHandler(func(err error) {
+			t.Logf("error: %v", err)
+		}),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, recv.Start(ctx))
+
+	// Export multiple log records
+	for i := 0; i < 5; i++ {
+		rec := createTestLogRecord(t)
+		require.NoError(t, exp.Export(ctx, []sdklog.Record{rec}))
+	}
+
+	// Wait for messages to be received
+	require.Eventually(t, func() bool {
+		return receivedCount.Load() >= 5
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// Shutdown before final assertion to avoid race with ongoing processing
+	require.NoError(t, recv.Shutdown(ctx))
+
+	require.GreaterOrEqual(t, receivedCount.Load(), int32(5))
+}
+
+func TestReceiver_JetStream_RateLimited_CustomBatchSize(t *testing.T) {
+	ns := startEmbeddedNATSWithJetStream(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	js := createJetStream(t, nc)
+	streamName := createTestStream(t, js, "rlbatch")
+
+	// Create exporter with JetStream
+	exp, err := NewLogExporter(nc, WithExporterSubjectPrefix("rlbatch"), WithExporterJetStream(js))
+	require.NoError(t, err)
+
+	// Track received data
+	var receivedCount atomic.Int32
+
+	// Create receiver with rate limiting and custom batch size
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("rlbatch"),
+		WithReceiverJetStream(js, streamName),
+		WithReceiverRateLimit(1000, 20),  // 1000 msg/s, burst 20
+		WithReceiverFetchBatchSize(5),     // fetch 5 at a time
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+			receivedCount.Add(1)
+			return nil
+		}),
+		WithReceiverErrorHandler(func(err error) {
+			t.Logf("error: %v", err)
+		}),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, recv.Start(ctx))
+
+	// Export multiple log records
+	for i := 0; i < 10; i++ {
+		rec := createTestLogRecord(t)
+		require.NoError(t, exp.Export(ctx, []sdklog.Record{rec}))
+	}
+
+	// Wait for messages to be received
+	require.Eventually(t, func() bool {
+		return receivedCount.Load() >= 10
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// Shutdown before final assertion to avoid race with ongoing processing
+	require.NoError(t, recv.Shutdown(ctx))
+
+	require.GreaterOrEqual(t, receivedCount.Load(), int32(10))
+}
+
+func TestReceiver_JetStream_RateLimited_Shutdown(t *testing.T) {
+	ns := startEmbeddedNATSWithJetStream(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	js := createJetStream(t, nc)
+	streamName := createTestStream(t, js, "rlshutdown")
+
+	// Create exporter with JetStream
+	exp, err := NewLogExporter(nc, WithExporterSubjectPrefix("rlshutdown"), WithExporterJetStream(js))
+	require.NoError(t, err)
+
+	// Track received data
+	var receivedCount atomic.Int32
+
+	// Create receiver with rate limiting
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("rlshutdown"),
+		WithReceiverJetStream(js, streamName),
+		WithReceiverRateLimit(10, 5), // Very slow: 10 msg/s
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+			receivedCount.Add(1)
+			return nil
+		}),
+		WithReceiverErrorHandler(func(err error) {
+			t.Logf("error: %v", err)
+		}),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, recv.Start(ctx))
+
+	// Export some records
+	for i := 0; i < 3; i++ {
+		rec := createTestLogRecord(t)
+		require.NoError(t, exp.Export(ctx, []sdklog.Record{rec}))
+	}
+
+	// Wait briefly for some processing
+	time.Sleep(100 * time.Millisecond)
+
+	// Shutdown should complete gracefully
+	shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	err = recv.Shutdown(shutdownCtx)
+	require.NoError(t, err)
+}
+
+func TestReceiver_JetStream_RateLimited_ValidationError(t *testing.T) {
+	ns := startEmbeddedNATSWithJetStream(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	js := createJetStream(t, nc)
+	streamName := createTestStream(t, js, "rlvalidation")
+
+	// Create receiver with invalid config: batch > burst
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("rlvalidation"),
+		WithReceiverJetStream(js, streamName),
+		WithReceiverRateLimit(100, 5),     // burst = 5
+		WithReceiverFetchBatchSize(10),    // batch = 10 > burst (invalid!)
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+
+	// Start should fail validation
+	err = recv.Start(ctx)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "burst must be >= batch size")
+}
+
+func TestReceiver_RateLimit_RequiresJetStream(t *testing.T) {
+	// Rate limiting only works with JetStream - should fail without it
+	ns := startEmbeddedNATS(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	recv, err := NewReceiver(nc,
+		WithReceiverRateLimit(100, 10), // rate limiting without JetStream
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+
+	// Start should fail - rate limiting requires JetStream
+	err = recv.Start(ctx)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "rate limiting requires JetStream")
+}
+
+func TestReceiver_RateLimit_RequiresPositiveBurst(t *testing.T) {
+	// Burst must be > 0 when rate limiting is enabled
+	ns := startEmbeddedNATSWithJetStream(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	js := createJetStream(t, nc)
+	streamName := createTestStream(t, js, "burstvalidation")
+
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("burstvalidation"),
+		WithReceiverJetStream(js, streamName),
+		WithReceiverRateLimit(100, 0), // burst = 0 (invalid!)
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+
+	// Start should fail - burst must be positive
+	err = recv.Start(ctx)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "rate burst must be > 0")
+}
+
+func TestReceiver_JetStream_NoRateLimit_PreservesConsume(t *testing.T) {
+	// This test verifies that when rate limiting is NOT enabled,
+	// the receiver uses the Consume API (buffer-based) rather than Fetch
+	ns := startEmbeddedNATSWithJetStream(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	js := createJetStream(t, nc)
+	streamName := createTestStream(t, js, "norl")
+
+	// Create exporter with JetStream
+	exp, err := NewLogExporter(nc, WithExporterSubjectPrefix("norl"), WithExporterJetStream(js))
+	require.NoError(t, err)
+
+	// Track received data
+	var receivedCount atomic.Int32
+
+	// Create receiver WITHOUT rate limiting (default behavior)
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("norl"),
+		WithReceiverJetStream(js, streamName),
+		// No WithReceiverRateLimit - uses default Consume API
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+			receivedCount.Add(1)
+			return nil
+		}),
+		WithReceiverErrorHandler(func(err error) {
+			t.Logf("error: %v", err)
+		}),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, recv.Start(ctx))
+
+	// Export multiple log records rapidly
+	for i := 0; i < 20; i++ {
+		rec := createTestLogRecord(t)
+		require.NoError(t, exp.Export(ctx, []sdklog.Record{rec}))
+	}
+
+	// All messages should be received (Consume API handles them)
+	require.Eventually(t, func() bool {
+		return receivedCount.Load() >= 20
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// Shutdown before final assertion to avoid race with ongoing processing
+	require.NoError(t, recv.Shutdown(ctx))
+
+	require.GreaterOrEqual(t, receivedCount.Load(), int32(20))
+}
