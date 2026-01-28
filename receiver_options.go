@@ -119,13 +119,59 @@ func WithReceiverAckWait(d time.Duration) ReceiverOption {
 }
 
 // WithReceiverBacklogSize sets the buffer size for the message backlog channel.
-// This channel buffers messages between the JetStream Consume callback and the
-// handler goroutine. A larger buffer allows the Consume callback to accept more
-// messages without blocking, but uses more memory. The default is 100.
-// Only applies when JetStream is enabled via [WithReceiverJetStream].
+// This is used for Core NATS subscriptions (non-JetStream) to buffer messages
+// between the subscription callback and the handler goroutine.
+// A larger buffer allows the callback to accept more messages without blocking.
+// The default is 100.
+//
+// NOTE: This option does NOT apply to JetStream, which uses the Fetch API
+// and processes messages directly without buffering.
 func WithReceiverBacklogSize(size int) ReceiverOption {
 	return func(c *receiverConfig) {
 		c.backlogSize = size
+	}
+}
+
+// WithReceiverRateLimit enables token bucket rate limiting for JetStream consumption.
+// limit specifies the target rate in messages per second.
+// burst specifies the token bucket capacity (maximum tokens that can accumulate).
+//
+// When rate limiting is enabled, the receiver switches from push-based Consume()
+// to pull-based Fetch() API. Tokens are acquired BEFORE calling Fetch() to ensure
+// messages don't sit in buffers wasting ACK timeout.
+//
+// A limit of 0 disables rate limiting (default behavior using Consume API).
+// Only applies when JetStream is enabled via [WithReceiverJetStream].
+//
+// Use [WithReceiverFetchBatchSize] to set the batch size for Fetch() calls.
+// If not set, batch size defaults to the burst value.
+//
+// Example:
+//
+//	// 100 messages/second with burst capacity of 20
+//	WithReceiverRateLimit(100, 20)
+func WithReceiverRateLimit(limit float64, burst int) ReceiverOption {
+	return func(c *receiverConfig) {
+		c.rateLimit = limit
+		c.rateBurst = burst
+	}
+}
+
+// WithReceiverFetchBatchSize sets the batch size for rate-limited Fetch() calls.
+// This is also the number of tokens acquired per fetch iteration.
+//
+// Must be <= burst value set via [WithReceiverRateLimit] (validated at Start()).
+// If not set, defaults to the burst value.
+//
+// Only applies when rate limiting is enabled via [WithReceiverRateLimit].
+//
+// Example:
+//
+//	WithReceiverRateLimit(100, 20),    // 100 msg/s, burst 20
+//	WithReceiverFetchBatchSize(10),    // fetch 10 messages at a time
+func WithReceiverFetchBatchSize(size int) ReceiverOption {
+	return func(c *receiverConfig) {
+		c.rateBatchSize = size
 	}
 }
 
