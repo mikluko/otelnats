@@ -89,6 +89,12 @@ func (r *receiverImpl) Start(ctx context.Context) error {
 
 	// Validate rate limiting configuration
 	if r.config.rateLimit > 0 {
+		if r.config.jetstream == nil {
+			return errors.New("rate limiting requires JetStream (use WithReceiverJetStream)")
+		}
+		if r.config.rateBurst <= 0 {
+			return errors.New("rate burst must be > 0")
+		}
 		// Default batchSize to burst if not explicitly set
 		if r.config.rateBatchSize == 0 {
 			r.config.rateBatchSize = r.config.rateBurst
@@ -245,8 +251,11 @@ func (r *receiverImpl) setupJetStreamFetch(consumer jetstream.Consumer) error {
 				case <-fetchCtx.Done():
 					return
 				default:
-					r.errorHandler(err)
-					time.Sleep(100 * time.Millisecond)
+					// ErrNoMessages is normal when no messages available - not an error
+					if !errors.Is(err, jetstream.ErrNoMessages) {
+						r.errorHandler(err)
+						time.Sleep(fetchRetryDelay)
+					}
 					continue
 				}
 			}
@@ -284,8 +293,8 @@ func (r *receiverImpl) calculateFetchTimeout(batchSize int) time.Duration {
 	var timeout time.Duration
 
 	if r.config.rateLimit > 0 {
-		// Time to consume batch at configured rate, plus 1 second buffer
-		timeout = time.Duration(float64(batchSize)/r.config.rateLimit*float64(time.Second)) + time.Second
+		// Time to consume batch at configured rate, plus buffer for network latency
+		timeout = time.Duration(float64(batchSize)/r.config.rateLimit*float64(time.Second)) + minFetchTimeout
 	} else {
 		// No rate limit - use default fetch timeout for responsive shutdown
 		timeout = defaultFetchTimeout
@@ -296,9 +305,9 @@ func (r *receiverImpl) calculateFetchTimeout(batchSize int) time.Duration {
 		timeout = r.config.ackWait
 	}
 
-	// Minimum 1 second
-	if timeout < time.Second {
-		timeout = time.Second
+	// Ensure minimum timeout for network operations
+	if timeout < minFetchTimeout {
+		timeout = minFetchTimeout
 	}
 
 	return timeout

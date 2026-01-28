@@ -1487,6 +1487,51 @@ func TestReceiver_JetStream_RateLimited_ValidationError(t *testing.T) {
 	require.Contains(t, err.Error(), "burst must be >= batch size")
 }
 
+func TestReceiver_RateLimit_RequiresJetStream(t *testing.T) {
+	// Rate limiting only works with JetStream - should fail without it
+	ns := startEmbeddedNATS(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	recv, err := NewReceiver(nc,
+		WithReceiverRateLimit(100, 10), // rate limiting without JetStream
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+
+	// Start should fail - rate limiting requires JetStream
+	err = recv.Start(ctx)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "rate limiting requires JetStream")
+}
+
+func TestReceiver_RateLimit_RequiresPositiveBurst(t *testing.T) {
+	// Burst must be > 0 when rate limiting is enabled
+	ns := startEmbeddedNATSWithJetStream(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	js := createJetStream(t, nc)
+	streamName := createTestStream(t, js, "burstvalidation")
+
+	recv, err := NewReceiver(nc,
+		WithReceiverSubjectPrefix("burstvalidation"),
+		WithReceiverJetStream(js, streamName),
+		WithReceiverRateLimit(100, 0), // burst = 0 (invalid!)
+		WithReceiverLogsHandler(func(ctx context.Context, msg MessageSignal[logspb.LogsData]) error {
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+
+	// Start should fail - burst must be positive
+	err = recv.Start(ctx)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "rate burst must be > 0")
+}
+
 func TestReceiver_JetStream_NoRateLimit_PreservesConsume(t *testing.T) {
 	// This test verifies that when rate limiting is NOT enabled,
 	// the receiver uses the Consume API (buffer-based) rather than Fetch
