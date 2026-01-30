@@ -1,6 +1,6 @@
 module github.com/mikluko/otelnats
 
-go 1.25
+go 1.24.0
 
 require (
 	github.com/nats-io/nats-server/v2 v2.12.3
