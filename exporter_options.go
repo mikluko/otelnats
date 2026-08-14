@@ -5,6 +5,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel/sdk/metric"
 )
 
 // ExporterOption configures an exporter or receiver.
@@ -48,6 +49,29 @@ func WithExporterEncoding(enc Encoding) ExporterOption {
 func WithExporterJetStream(js jetstream.JetStream) ExporterOption {
 	return func(c *config) {
 		c.jetstream = js
+	}
+}
+
+// WithExporterTemporality sets the aggregation temporality the metric exporter
+// reports for each instrument kind. A PeriodicReader takes its temporality from
+// its exporter, so this is what decides whether the SDK re-exports every series
+// it has ever seen on every collection (cumulative) or only what changed since
+// the last one (delta).
+//
+// The default is [metric.DefaultTemporalitySelector], which is cumulative for
+// every kind. Delta suits a short-lived attribute set, where cumulative retains
+// each one for the process's lifetime:
+//
+//	otelnats.WithExporterTemporality(func(metric.InstrumentKind) metricdata.Temporality {
+//		return metricdata.DeltaTemporality
+//	})
+//
+// It has no effect on the trace or log exporters.
+func WithExporterTemporality(sel metric.TemporalitySelector) ExporterOption {
+	return func(c *config) {
+		if sel != nil {
+			c.temporality = sel
+		}
 	}
 }
 

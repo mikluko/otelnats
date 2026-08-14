@@ -186,6 +186,40 @@ func TestLogExporter_RecordGrouping(t *testing.T) {
 	require.Len(t, logsData.ResourceLogs[0].ScopeLogs[0].LogRecords, 2)
 }
 
+// TestLogExporter_EventName pins that a record's event name reaches the wire.
+// The event name is what distinguishes a structured event from an ordinary log
+// line, so a consumer routing on it sees every record as unnamed without this.
+func TestLogExporter_EventName(t *testing.T) {
+	ns := startEmbeddedNATS(t)
+	nc := connectToNATS(t, ns)
+	ctx := t.Context()
+
+	exp, err := NewLogExporter(nc, WithExporterSubjectPrefix("evname"))
+	require.NoError(t, err)
+
+	sub, err := nc.SubscribeSync("evname.logs")
+	require.NoError(t, err)
+	defer sub.Unsubscribe()
+
+	named := createTestLogRecord(t)
+	named.SetEventName("acme.thing.happened")
+	unnamed := createTestLogRecord(t)
+
+	err = exp.Export(ctx, []sdklog.Record{named, unnamed})
+	require.NoError(t, err)
+
+	msg := requireMessage(t, sub, 5*time.Second)
+
+	var logsData logspb.LogsData
+	err = proto.Unmarshal(msg.Data, &logsData)
+	require.NoError(t, err)
+
+	records := logsData.ResourceLogs[0].ScopeLogs[0].LogRecords
+	require.Len(t, records, 2)
+	require.Equal(t, "acme.thing.happened", records[0].EventName)
+	require.Empty(t, records[1].EventName)
+}
+
 // createTestLogRecord creates a log record for testing.
 func createTestLogRecord(t *testing.T) sdklog.Record {
 	t.Helper()

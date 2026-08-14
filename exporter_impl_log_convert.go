@@ -104,6 +104,7 @@ func recordToProto(rec sdklog.Record) *logspb.LogRecord {
 	lr := &logspb.LogRecord{
 		TimeUnixNano:         uint64(rec.Timestamp().UnixNano()),
 		ObservedTimeUnixNano: uint64(rec.ObservedTimestamp().UnixNano()),
+		EventName:            rec.EventName(),
 		SeverityNumber:       logspb.SeverityNumber(rec.Severity()),
 		SeverityText:         rec.SeverityText(),
 		Body:                 logValueToProto(rec.Body()),
