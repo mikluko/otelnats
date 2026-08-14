@@ -5,6 +5,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel/sdk/metric"
 )
 
 // config holds shared configuration for exporters and receivers.
@@ -15,6 +16,7 @@ type config struct {
 	jetstream     jetstream.JetStream
 	encoding      Encoding
 	headers       func(context.Context) nats.Header
+	temporality   metric.TemporalitySelector
 }
 
 func defaultConfig(nc *nats.Conn) *config {
@@ -23,6 +25,7 @@ func defaultConfig(nc *nats.Conn) *config {
 		subjectPrefix: defaultSubjectPrefix,
 		subjectSuffix: defaultSubjectSuffix,
 		encoding:      defaultEncoding,
+		temporality:   metric.DefaultTemporalitySelector,
 	}
 }
 

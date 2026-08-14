@@ -98,6 +98,113 @@ func TestMetricExporter_Temporality(t *testing.T) {
 	// Default should be cumulative
 	require.Equal(t, metricdata.CumulativeTemporality, exp.Temporality(metric.InstrumentKindCounter))
 	require.Equal(t, metricdata.CumulativeTemporality, exp.Temporality(metric.InstrumentKindHistogram))
+
+	t.Run("selector overrides the default", func(t *testing.T) {
+		exp, err := NewMetricExporter(nc, WithExporterTemporality(
+			func(metric.InstrumentKind) metricdata.Temporality {
+				return metricdata.DeltaTemporality
+			},
+		))
+		require.NoError(t, err)
+		require.Equal(t, metricdata.DeltaTemporality, exp.Temporality(metric.InstrumentKindCounter))
+		require.Equal(t, metricdata.DeltaTemporality, exp.Temporality(metric.InstrumentKindHistogram))
+	})
+
+	t.Run("selector may vary by instrument kind", func(t *testing.T) {
+		exp, err := NewMetricExporter(nc, WithExporterTemporality(
+			func(k metric.InstrumentKind) metricdata.Temporality {
+				if k == metric.InstrumentKindHistogram {
+					return metricdata.DeltaTemporality
+				}
+				return metricdata.CumulativeTemporality
+			},
+		))
+		require.NoError(t, err)
+		require.Equal(t, metricdata.DeltaTemporality, exp.Temporality(metric.InstrumentKindHistogram))
+		require.Equal(t, metricdata.CumulativeTemporality, exp.Temporality(metric.InstrumentKindCounter))
+	})
+
+	t.Run("nil selector leaves the default in place", func(t *testing.T) {
+		exp, err := NewMetricExporter(nc, WithExporterTemporality(nil))
+		require.NoError(t, err)
+		require.Equal(t, metricdata.CumulativeTemporality, exp.Temporality(metric.InstrumentKindCounter))
+	})
+}
+
+// TestMetricExporter_Exemplars pins that a data point's exemplars reach the wire.
+// An exemplar carries the instant of an individual measurement, which the data
+// point's own timestamps describe only as a collection interval, so dropping
+// them discards the only per-measurement time the metric path has.
+func TestMetricExporter_Exemplars(t *testing.T) {
+	observed := time.Now().Add(-42 * time.Second).UTC().Truncate(time.Nanosecond)
+	traceID := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+	spanID := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+
+	rm := &metricdata.ResourceMetrics{
+		Resource: resource.Empty(),
+		ScopeMetrics: []metricdata.ScopeMetrics{{
+			Scope: instrumentation.Scope{Name: "test"},
+			Metrics: []metricdata.Metrics{{
+				Name: "with.exemplar",
+				Data: metricdata.Gauge[float64]{
+					DataPoints: []metricdata.DataPoint[float64]{{
+						Attributes: attribute.NewSet(attribute.String("k", "v")),
+						StartTime:  observed,
+						Time:       observed.Add(time.Second),
+						Value:      1.5,
+						Exemplars: []metricdata.Exemplar[float64]{{
+							FilteredAttributes: []attribute.KeyValue{attribute.String("execution.uid", "exec0001")},
+							Time:               observed,
+							Value:              1.5,
+							TraceID:            traceID,
+							SpanID:             spanID,
+						}},
+					}},
+				},
+			}},
+		}},
+	}
+
+	data := resourceMetricsToProto(rm)
+	require.Len(t, data.ResourceMetrics, 1)
+	pts := data.ResourceMetrics[0].ScopeMetrics[0].Metrics[0].GetGauge().DataPoints
+	require.Len(t, pts, 1)
+	require.Len(t, pts[0].Exemplars, 1)
+
+	ex := pts[0].Exemplars[0]
+	require.Equal(t, uint64(observed.UnixNano()), ex.TimeUnixNano)
+	require.InDelta(t, 1.5, ex.GetAsDouble(), 1e-9)
+	require.Equal(t, traceID, ex.TraceId)
+	require.Equal(t, spanID, ex.SpanId)
+	require.Len(t, ex.FilteredAttributes, 1)
+	require.Equal(t, "execution.uid", ex.FilteredAttributes[0].Key)
+	require.Equal(t, "exec0001", ex.FilteredAttributes[0].Value.GetStringValue())
+}
+
+// TestMetricExporter_ExemplarsAbsent pins that no exemplars means the field is
+// left nil rather than an empty slice, so an encoded payload does not grow.
+func TestMetricExporter_ExemplarsAbsent(t *testing.T) {
+	rm := &metricdata.ResourceMetrics{
+		Resource: resource.Empty(),
+		ScopeMetrics: []metricdata.ScopeMetrics{{
+			Scope: instrumentation.Scope{Name: "test"},
+			Metrics: []metricdata.Metrics{{
+				Name: "no.exemplar",
+				Data: metricdata.Sum[int64]{
+					Temporality: metricdata.DeltaTemporality,
+					DataPoints: []metricdata.DataPoint[int64]{{
+						Attributes: attribute.NewSet(),
+						Value:      7,
+					}},
+				},
+			}},
+		}},
+	}
+
+	data := resourceMetricsToProto(rm)
+	pts := data.ResourceMetrics[0].ScopeMetrics[0].Metrics[0].GetSum().DataPoints
+	require.Len(t, pts, 1)
+	require.Nil(t, pts[0].Exemplars)
 }
 
 func TestMetricExporter_Aggregation(t *testing.T) {

@@ -25,7 +25,7 @@ func NewMetricExporter(nc *nats.Conn, opts ...ExporterOption) (metric.Exporter, 
 		marshaler:   cfg.marshaler(),
 		publisher:   cfg.publisher(),
 		lifecycle:   &lifecycle{nc: nc},
-		temporality: metricdata.CumulativeTemporality,
+		temporality: cfg.temporality,
 	}
 	return &impl, nil
 }
@@ -38,13 +38,13 @@ type metricExporterImpl struct {
 	*lifecycle
 	*config
 
-	temporality metricdata.Temporality
+	temporality metric.TemporalitySelector
 }
 
 // Temporality returns the temporality for the given instrument kind.
-// By default, cumulative temporality is used for all instruments.
-func (e *metricExporterImpl) Temporality(_ metric.InstrumentKind) metricdata.Temporality {
-	return e.temporality
+// Cumulative for every kind unless [WithExporterTemporality] says otherwise.
+func (e *metricExporterImpl) Temporality(kind metric.InstrumentKind) metricdata.Temporality {
+	return e.temporality(kind)
 }
 
 // Aggregation returns the aggregation for the given instrument kind.

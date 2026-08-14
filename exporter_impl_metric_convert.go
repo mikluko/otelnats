@@ -147,6 +147,7 @@ func int64DataPointsToProto(dps []metricdata.DataPoint[int64]) []*metricspb.Numb
 			StartTimeUnixNano: uint64(dp.StartTime.UnixNano()),
 			TimeUnixNano:      uint64(dp.Time.UnixNano()),
 			Value:             &metricspb.NumberDataPoint_AsInt{AsInt: dp.Value},
+			Exemplars:         exemplarsToProto(dp.Exemplars),
 		}
 	}
 	return result
@@ -160,6 +161,55 @@ func float64DataPointsToProto(dps []metricdata.DataPoint[float64]) []*metricspb.
 			StartTimeUnixNano: uint64(dp.StartTime.UnixNano()),
 			TimeUnixNano:      uint64(dp.Time.UnixNano()),
 			Value:             &metricspb.NumberDataPoint_AsDouble{AsDouble: dp.Value},
+			Exemplars:         exemplarsToProto(dp.Exemplars),
+		}
+	}
+	return result
+}
+
+// exemplarsToProto converts SDK exemplars to OTLP.
+//
+// An exemplar carries the instant of one individual measurement that an
+// aggregated data point was built from, which the data point's own timestamps
+// cannot express: those describe the collection interval, not the measurement.
+// Dropping exemplars therefore discards the only per-measurement time on the
+// metric path.
+func exemplarsToProto[N int64 | float64](exs []metricdata.Exemplar[N]) []*metricspb.Exemplar {
+	if len(exs) == 0 {
+		return nil
+	}
+	result := make([]*metricspb.Exemplar, len(exs))
+	for i, ex := range exs {
+		pe := &metricspb.Exemplar{
+			TimeUnixNano:       uint64(ex.Time.UnixNano()),
+			FilteredAttributes: attributeKeyValuesToProto(ex.FilteredAttributes),
+		}
+		switch v := any(ex.Value).(type) {
+		case int64:
+			pe.Value = &metricspb.Exemplar_AsInt{AsInt: v}
+		case float64:
+			pe.Value = &metricspb.Exemplar_AsDouble{AsDouble: v}
+		}
+		if len(ex.SpanID) > 0 {
+			pe.SpanId = ex.SpanID
+		}
+		if len(ex.TraceID) > 0 {
+			pe.TraceId = ex.TraceID
+		}
+		result[i] = pe
+	}
+	return result
+}
+
+func attributeKeyValuesToProto(kvs []attribute.KeyValue) []*commonpb.KeyValue {
+	if len(kvs) == 0 {
+		return nil
+	}
+	result := make([]*commonpb.KeyValue, len(kvs))
+	for i, kv := range kvs {
+		result[i] = &commonpb.KeyValue{
+			Key:   string(kv.Key),
+			Value: attributeValueToProto(kv.Value),
 		}
 	}
 	return result
@@ -189,6 +239,7 @@ func histogramDataPointsToProto[N int64 | float64](dps []metricdata.HistogramDat
 			Sum:               ptrFloat64(float64(dp.Sum)),
 			BucketCounts:      dp.BucketCounts,
 			ExplicitBounds:    dp.Bounds,
+			Exemplars:         exemplarsToProto(dp.Exemplars),
 		}
 		if minVal, ok := dp.Min.Value(); ok {
 			hdp.Min = ptrFloat64(float64(minVal))
@@ -220,6 +271,7 @@ func expHistogramDataPointsToProto[N int64 | float64](dps []metricdata.Exponenti
 				Offset:       dp.NegativeBucket.Offset,
 				BucketCounts: dp.NegativeBucket.Counts,
 			},
+			Exemplars: exemplarsToProto(dp.Exemplars),
 		}
 		if minVal, ok := dp.Min.Value(); ok {
 			ehdp.Min = ptrFloat64(float64(minVal))
