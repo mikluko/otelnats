@@ -7,12 +7,14 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 )
 
@@ -220,6 +222,60 @@ func TestLogExporter_EventName(t *testing.T) {
 	require.Empty(t, records[1].EventName)
 }
 
+func TestAttributeValueToProto(t *testing.T) {
+	str := func(s string) *commonpb.AnyValue {
+		return &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: s}}
+	}
+	i64 := func(n int64) *commonpb.AnyValue {
+		return &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: n}}
+	}
+
+	tests := []struct {
+		name string
+		in   attribute.Value
+		want *commonpb.AnyValue
+	}{
+		{
+			name: "empty",
+			in:   attribute.Value{},
+			want: &commonpb.AnyValue{},
+		},
+		{
+			name: "bytes",
+			in:   attribute.ByteSliceValue([]byte{0x01, 0x02}),
+			want: &commonpb.AnyValue{Value: &commonpb.AnyValue_BytesValue{BytesValue: []byte{0x01, 0x02}}},
+		},
+		{
+			name: "heterogeneous slice",
+			in:   attribute.SliceValue(attribute.StringValue("a"), attribute.Int64Value(1)),
+			want: &commonpb.AnyValue{Value: &commonpb.AnyValue_ArrayValue{ArrayValue: &commonpb.ArrayValue{
+				Values: []*commonpb.AnyValue{str("a"), i64(1)},
+			}}},
+		},
+		{
+			name: "nested map",
+			in: attribute.MapValue(
+				attribute.String("k", "v"),
+				attribute.KeyValue{Key: "inner", Value: attribute.MapValue(attribute.Int64("n", 2))},
+			),
+			want: &commonpb.AnyValue{Value: &commonpb.AnyValue_KvlistValue{KvlistValue: &commonpb.KeyValueList{
+				Values: []*commonpb.KeyValue{
+					{Key: "inner", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_KvlistValue{KvlistValue: &commonpb.KeyValueList{
+						Values: []*commonpb.KeyValue{{Key: "n", Value: i64(2)}},
+					}}}},
+					{Key: "k", Value: str("v")},
+				},
+			}}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := attributeValueToProto(tt.in)
+			require.True(t, proto.Equal(tt.want, got), "want %v, got %v", tt.want, got)
+		})
+	}
+}
+
 // createTestLogRecord creates a log record for testing.
 func createTestLogRecord(t *testing.T) sdklog.Record {
 	t.Helper()
@@ -229,10 +285,10 @@ func createTestLogRecord(t *testing.T) sdklog.Record {
 	rec.SetObservedTimestamp(time.Now())
 	rec.SetSeverity(log.SeverityInfo)
 	rec.SetSeverityText("INFO")
-	rec.SetBody(log.StringValue("test message"))
+	rec.SetBody(attribute.StringValue("test message"))
 	rec.SetAttributes(
-		log.String("key1", "value1"),
-		log.Int("key2", 42),
+		attribute.String("key1", "value1"),
+		attribute.Int("key2", 42),
 	)
 
 	// Set trace context

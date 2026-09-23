@@ -2,7 +2,6 @@ package otelnats
 
 import (
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/sdk/instrumentation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -107,7 +106,7 @@ func recordToProto(rec sdklog.Record) *logspb.LogRecord {
 		EventName:            rec.EventName(),
 		SeverityNumber:       logspb.SeverityNumber(rec.Severity()),
 		SeverityText:         rec.SeverityText(),
-		Body:                 logValueToProto(rec.Body()),
+		Body:                 attributeValueToProto(rec.Body()),
 	}
 
 	// Add trace context if present
@@ -121,10 +120,10 @@ func recordToProto(rec sdklog.Record) *logspb.LogRecord {
 	}
 
 	// Add attributes
-	rec.WalkAttributes(func(kv log.KeyValue) bool {
+	rec.WalkAttributes(func(kv attribute.KeyValue) bool {
 		lr.Attributes = append(lr.Attributes, &commonpb.KeyValue{
-			Key:   kv.Key,
-			Value: logValueToProto(kv.Value),
+			Key:   string(kv.Key),
+			Value: attributeValueToProto(kv.Value),
 		})
 		return true
 	})
@@ -179,63 +178,30 @@ func attributeValueToProto(v attribute.Value) *commonpb.AnyValue {
 			arr.Values[i] = &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: val}}
 		}
 		return &commonpb.AnyValue{Value: &commonpb.AnyValue_ArrayValue{ArrayValue: arr}}
-	default:
+	case attribute.BYTESLICE:
 		return &commonpb.AnyValue{
-			Value: &commonpb.AnyValue_StringValue{StringValue: v.AsString()},
+			Value: &commonpb.AnyValue_BytesValue{BytesValue: v.AsByteSlice()},
 		}
-	}
-}
-
-// logValueToProto converts a log.Value to proto AnyValue.
-func logValueToProto(v log.Value) *commonpb.AnyValue {
-	switch v.Kind() {
-	case log.KindBool:
-		return &commonpb.AnyValue{
-			Value: &commonpb.AnyValue_BoolValue{BoolValue: v.AsBool()},
-		}
-	case log.KindFloat64:
-		return &commonpb.AnyValue{
-			Value: &commonpb.AnyValue_DoubleValue{DoubleValue: v.AsFloat64()},
-		}
-	case log.KindInt64:
-		return &commonpb.AnyValue{
-			Value: &commonpb.AnyValue_IntValue{IntValue: v.AsInt64()},
-		}
-	case log.KindString:
-		return &commonpb.AnyValue{
-			Value: &commonpb.AnyValue_StringValue{StringValue: v.AsString()},
-		}
-	case log.KindBytes:
-		return &commonpb.AnyValue{
-			Value: &commonpb.AnyValue_BytesValue{BytesValue: v.AsBytes()},
-		}
-	case log.KindSlice:
+	case attribute.SLICE:
 		items := v.AsSlice()
-		arr := &commonpb.ArrayValue{
-			Values: make([]*commonpb.AnyValue, len(items)),
-		}
+		arr := &commonpb.ArrayValue{Values: make([]*commonpb.AnyValue, len(items))}
 		for i, item := range items {
-			arr.Values[i] = logValueToProto(item)
+			arr.Values[i] = attributeValueToProto(item)
 		}
-		return &commonpb.AnyValue{
-			Value: &commonpb.AnyValue_ArrayValue{ArrayValue: arr},
-		}
-	case log.KindMap:
+		return &commonpb.AnyValue{Value: &commonpb.AnyValue_ArrayValue{ArrayValue: arr}}
+	case attribute.MAP:
 		items := v.AsMap()
-		kvl := &commonpb.KeyValueList{
-			Values: make([]*commonpb.KeyValue, len(items)),
-		}
+		kvl := &commonpb.KeyValueList{Values: make([]*commonpb.KeyValue, len(items))}
 		for i, kv := range items {
 			kvl.Values[i] = &commonpb.KeyValue{
-				Key:   kv.Key,
-				Value: logValueToProto(kv.Value),
+				Key:   string(kv.Key),
+				Value: attributeValueToProto(kv.Value),
 			}
 		}
-		return &commonpb.AnyValue{
-			Value: &commonpb.AnyValue_KvlistValue{KvlistValue: kvl},
-		}
+		return &commonpb.AnyValue{Value: &commonpb.AnyValue_KvlistValue{KvlistValue: kvl}}
+	case attribute.EMPTY:
+		return &commonpb.AnyValue{}
 	default:
-		// KindEmpty or unknown
 		return &commonpb.AnyValue{
 			Value: &commonpb.AnyValue_StringValue{StringValue: v.AsString()},
 		}
