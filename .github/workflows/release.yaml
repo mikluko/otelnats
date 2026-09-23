@@ -1,0 +1,56 @@
+name: Release
+
+# The changelog decides. A push to main whose newest entry names a version no
+# tag carries cuts that release, and nothing else does. Cutting is gated on
+# the shared CI job so a release is never published from a commit CI failed.
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yaml
+
+  release:
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The reference tag is the newest one reachable from HEAD, so the
+          # full history and tags need to be here.
+          fetch-depth: 0
+
+      - id: changelog
+        uses: mikluko/action-changelog@v1
+        with:
+          changelog: CHANGELOG.md
+
+      - name: Cut the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALID: ${{ steps.changelog.outputs.valid }}
+          VERSION: ${{ steps.changelog.outputs.version }}
+          TAGGED: ${{ steps.changelog.outputs.already-tagged }}
+          PRERELEASE: ${{ steps.changelog.outputs.prerelease }}
+          NOTES: ${{ steps.changelog.outputs.notes }}
+        run: |
+          if [ "$VALID" != "true" ]; then
+            echo "No release: the changelog does not validate." >>"$GITHUB_STEP_SUMMARY"
+          elif [ -z "$VERSION" ]; then
+            echo "No release: the newest entry names no version." >>"$GITHUB_STEP_SUMMARY"
+          elif [ "$PRERELEASE" = "true" ]; then
+            echo "No release: this repository publishes none. The newest entry names $VERSION, a pre-release." >>"$GITHUB_STEP_SUMMARY"
+          elif [ "$TAGGED" = "true" ]; then
+            echo "No release: v$VERSION is already tagged." >>"$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s\n' "$NOTES" >"$RUNNER_TEMP/notes.md"
+            gh release create "v$VERSION" \
+              --title "v$VERSION" \
+              --target "$GITHUB_SHA" \
+              --notes-file "$RUNNER_TEMP/notes.md"
+            echo "Released v$VERSION." >>"$GITHUB_STEP_SUMMARY"
+          fi
