@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-23
+
 ### Changed
 
 - The module requires Go 1.26, OpenTelemetry Go SDK v1.46.0 and the log SDK v0.22.0.
@@ -104,7 +106,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Log, metric and trace exporters that publish OTLP to NATS subjects, over Core NATS or JetStream.
 - A receiver that consumes OTLP from NATS subjects, over Core NATS or JetStream.
 
-[Unreleased]: https://github.com/mikluko/otelnats/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/mikluko/otelnats/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/mikluko/otelnats/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/mikluko/otelnats/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/mikluko/otelnats/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/mikluko/otelnats/compare/v0.7.1...v0.8.0
